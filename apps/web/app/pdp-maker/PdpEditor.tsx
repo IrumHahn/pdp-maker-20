@@ -56,6 +56,14 @@ interface PdpEditorProps {
   saveState?: "idle" | "saving" | "saved" | "error";
 }
 
+interface ImageColorRecommendations {
+  textColors: string[];
+  backgroundColors: string[];
+  accentColor: string;
+  darkColor: string;
+  lightColor: string;
+}
+
 const FONT_OPTIONS = [
   { label: "Pretendard", value: "'Pretendard', sans-serif" },
   { label: "Noto Sans KR", value: "'Noto Sans KR', sans-serif" },
@@ -104,6 +112,15 @@ const ALIGN_OPTIONS: Array<{ value: OverlayTextAlign; label: string; Icon: typeo
   { value: "right", label: "오른쪽", Icon: AlignRight }
 ];
 
+const DEFAULT_COLOR_RECOMMENDATIONS: ImageColorRecommendations = {
+  textColors: ["#ffffff", "#102532", "#f4efe6", "#4cb7aa"],
+  backgroundColors: ["#102532", "#1d3748", "#f4efe6", "#85735e"],
+  accentColor: "#4cb7aa",
+  darkColor: "#102532",
+  lightColor: "#f4efe6"
+};
+const SNAP_THRESHOLD = 10;
+
 export function PdpEditor({
   initialResult,
   aspectRatio,
@@ -129,10 +146,15 @@ export function PdpEditor({
   );
   const [sectionOptions, setSectionOptions] = useState<Record<number, ImageGenOptions>>(() => initialDraftState?.sectionOptions ?? {});
   const [overlaysBySection, setOverlaysBySection] = useState<Record<number, TextOverlay[]>>(
-    () => initialDraftState?.overlaysBySection ?? {}
+    () => normalizeOverlayRecord(initialDraftState?.overlaysBySection ?? {})
   );
   const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(null);
   const [editingOverlayId, setEditingOverlayId] = useState<string | null>(null);
+  const [snapGuides, setSnapGuides] = useState<{ vertical: number | null; horizontal: number | null }>({
+    vertical: null,
+    horizontal: null
+  });
+  const [colorRecommendations, setColorRecommendations] = useState<ImageColorRecommendations>(DEFAULT_COLOR_RECOMMENDATIONS);
   const [inspectorSections, setInspectorSections] = useState({
     shotMood: true,
     persona: true
@@ -165,6 +187,7 @@ export function PdpEditor({
     setSelectedOverlayId(null);
     setEditingOverlayId(null);
     setErrorMessage("");
+    setSnapGuides({ vertical: null, horizontal: null });
   }, [currentSectionIndex]);
 
   useEffect(() => {
@@ -199,6 +222,25 @@ export function PdpEditor({
   }, [currentSectionIndex, notice, onDraftStateChange, overlaysBySection, sectionOptions, sections, workbenchState, workbenchTab]);
 
   useEffect(() => {
+    let isCancelled = false;
+
+    if (!currentSection.generatedImage) {
+      setColorRecommendations(DEFAULT_COLOR_RECOMMENDATIONS);
+      return;
+    }
+
+    void extractImageColorRecommendations(currentSection.generatedImage).then((next) => {
+      if (!isCancelled) {
+        setColorRecommendations(next);
+      }
+    });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [currentSection.generatedImage]);
+
+  useEffect(() => {
     if (!manualSaveToastToken) {
       return;
     }
@@ -210,6 +252,15 @@ export function PdpEditor({
 
     return () => window.clearTimeout(timeout);
   }, [manualSaveToastToken]);
+
+  const textColorRecommendations = useMemo(
+    () => sortColorsByContrast(colorRecommendations.textColors, selectedOverlay?.backgroundEnabled ? selectedOverlay.backgroundColor : null),
+    [colorRecommendations.textColors, selectedOverlay?.backgroundColor, selectedOverlay?.backgroundEnabled]
+  );
+  const backgroundColorRecommendations = useMemo(
+    () => sortColorsByContrast(colorRecommendations.backgroundColors, selectedOverlay?.color ?? null),
+    [colorRecommendations.backgroundColors, selectedOverlay?.color]
+  );
 
   const currentOptions = useMemo(() => {
     return (
@@ -429,10 +480,7 @@ export function PdpEditor({
         return selectedOverlay ? (
           <div className={styles.workbenchSectionStack}>
             <div className={styles.toolbarRow}>
-              <button className={styles.inlineButton} onClick={snapWorkbenchToOverlay} type="button">
-                <RefreshCw size={14} />
-                텍스트 옆으로 붙이기
-              </button>
+              <p className={styles.floatingHint}>드래그하면 다른 텍스트의 왼쪽, 가운데, 오른쪽 선에 자석처럼 맞춰집니다.</p>
               <button className={styles.inlineDangerButton} onClick={() => deleteOverlay(selectedOverlay.id)} type="button">
                 <Trash2 size={14} />
                 삭제
@@ -543,7 +591,14 @@ export function PdpEditor({
               </label>
             </div>
 
-            <div className={styles.floatingCompactGrid}>
+            <div className={styles.optionSurface}>
+              <div className={styles.optionSectionHeader}>
+                <div>
+                  <span className={styles.optionSectionEyebrow}>Text color</span>
+                  <strong>글자색과 추천 팔레트</strong>
+                </div>
+                <Palette size={16} />
+              </div>
               <label className={styles.floatingField}>
                 <span className={styles.optionMiniLabel}>글자색</span>
                 <div className={styles.colorControlRow}>
@@ -556,31 +611,238 @@ export function PdpEditor({
                   <code>{selectedOverlay.color}</code>
                 </div>
               </label>
-
-              <label className={styles.floatingField}>
-                <span className={styles.optionMiniLabel}>배경색</span>
-                <div className={styles.colorControlRow}>
-                  <input
-                    className={styles.colorInputLarge}
-                    onChange={(event) => updateOverlay(selectedOverlay.id, { backgroundColor: event.target.value })}
-                    type="color"
-                    value={
-                      selectedOverlay.backgroundColor === "transparent"
-                        ? "#ffffff"
-                        : selectedOverlay.backgroundColor
-                    }
-                  />
-                  <button
-                    className={
-                      selectedOverlay.backgroundColor === "transparent" ? styles.ghostButtonActive : styles.ghostButton
-                    }
-                    onClick={() => updateOverlay(selectedOverlay.id, { backgroundColor: "transparent" })}
-                    type="button"
-                  >
-                    투명
-                  </button>
+              <div className={styles.recommendationGroup}>
+                <span className={styles.optionMiniLabel}>이미지 추천</span>
+                <div className={styles.swatchGrid}>
+                  {textColorRecommendations.map((color) => (
+                    <button
+                      className={styles.swatchButton}
+                      key={`text-${color}`}
+                      onClick={() => updateOverlay(selectedOverlay.id, { color })}
+                      style={{ ["--swatch-color" as string]: color }}
+                      type="button"
+                    >
+                      <span className={styles.swatchPreview} />
+                      <code>{color}</code>
+                    </button>
+                  ))}
                 </div>
+              </div>
+            </div>
+
+            <div className={styles.optionSurface}>
+              <div className={styles.optionSectionHeader}>
+                <div>
+                  <span className={styles.optionSectionEyebrow}>Background box</span>
+                  <strong>텍스트 뒤 배경 박스</strong>
+                </div>
+                <Palette size={16} />
+              </div>
+              <label className={styles.toggleCard}>
+                <div className={styles.toggleCardCopy}>
+                  <strong>배경 박스 표시</strong>
+                  <span>텍스트는 위에 두고, 이미지 위에는 부드러운 사각형 배경만 깔아줍니다.</span>
+                </div>
+                <input
+                  checked={selectedOverlay.backgroundEnabled}
+                  onChange={(event) => updateOverlay(selectedOverlay.id, { backgroundEnabled: event.target.checked })}
+                  type="checkbox"
+                />
               </label>
+
+              {selectedOverlay.backgroundEnabled ? (
+                <>
+                  <label className={styles.floatingField}>
+                    <span className={styles.optionMiniLabel}>배경색</span>
+                    <div className={styles.colorControlRow}>
+                      <input
+                        className={styles.colorInputLarge}
+                        onChange={(event) => updateOverlay(selectedOverlay.id, { backgroundColor: event.target.value })}
+                        type="color"
+                        value={selectedOverlay.backgroundColor}
+                      />
+                      <code>{selectedOverlay.backgroundColor}</code>
+                    </div>
+                  </label>
+                  <div className={styles.recommendationGroup}>
+                    <span className={styles.optionMiniLabel}>이미지 추천</span>
+                    <div className={styles.swatchGrid}>
+                      {backgroundColorRecommendations.map((color) => (
+                        <button
+                          className={styles.swatchButton}
+                          key={`background-${color}`}
+                          onClick={() => updateOverlay(selectedOverlay.id, { backgroundColor: color })}
+                          style={{ ["--swatch-color" as string]: color }}
+                          type="button"
+                        >
+                          <span className={styles.swatchPreview} />
+                          <code>{color}</code>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className={styles.floatingCompactGrid}>
+                    <label className={styles.floatingField}>
+                      <span className={styles.optionMiniLabel}>투명도</span>
+                      <div className={styles.rangeField}>
+                        <input
+                          className={styles.rangeInput}
+                          max={1}
+                          min={0.1}
+                          onChange={(event) => updateOverlay(selectedOverlay.id, { backgroundOpacity: Number(event.target.value) || 0.72 })}
+                          step={0.05}
+                          type="range"
+                          value={selectedOverlay.backgroundOpacity}
+                        />
+                        <input
+                          className={styles.input}
+                          max={1}
+                          min={0.1}
+                          onChange={(event) => updateOverlay(selectedOverlay.id, { backgroundOpacity: Number(event.target.value) || 0.72 })}
+                          step={0.05}
+                          type="number"
+                          value={selectedOverlay.backgroundOpacity}
+                        />
+                      </div>
+                    </label>
+
+                    <label className={styles.floatingField}>
+                      <span className={styles.optionMiniLabel}>모서리</span>
+                      <div className={styles.rangeField}>
+                        <input
+                          className={styles.rangeInput}
+                          max={40}
+                          min={0}
+                          onChange={(event) => updateOverlay(selectedOverlay.id, { backgroundRadius: Number(event.target.value) || 0 })}
+                          step={1}
+                          type="range"
+                          value={selectedOverlay.backgroundRadius}
+                        />
+                        <input
+                          className={styles.input}
+                          max={40}
+                          min={0}
+                          onChange={(event) => updateOverlay(selectedOverlay.id, { backgroundRadius: Number(event.target.value) || 0 })}
+                          step={1}
+                          type="number"
+                          value={selectedOverlay.backgroundRadius}
+                        />
+                      </div>
+                    </label>
+                  </div>
+                </>
+              ) : null}
+            </div>
+
+            <div className={styles.optionSurface}>
+              <div className={styles.optionSectionHeader}>
+                <div>
+                  <span className={styles.optionSectionEyebrow}>Shadow</span>
+                  <strong>가독성 그림자</strong>
+                </div>
+                <Sparkles size={16} />
+              </div>
+              <label className={styles.toggleCard}>
+                <div className={styles.toggleCardCopy}>
+                  <strong>그림자 사용</strong>
+                  <span>밝은 이미지 위에서도 텍스트가 또렷하게 읽히도록 부드러운 깊이를 더합니다.</span>
+                </div>
+                <input
+                  checked={selectedOverlay.shadowEnabled}
+                  onChange={(event) => updateOverlay(selectedOverlay.id, { shadowEnabled: event.target.checked })}
+                  type="checkbox"
+                />
+              </label>
+
+              {selectedOverlay.shadowEnabled ? (
+                <>
+                  <label className={styles.floatingField}>
+                    <span className={styles.optionMiniLabel}>그림자색</span>
+                    <div className={styles.colorControlRow}>
+                      <input
+                        className={styles.colorInputLarge}
+                        onChange={(event) => updateOverlay(selectedOverlay.id, { shadowColor: event.target.value })}
+                        type="color"
+                        value={selectedOverlay.shadowColor}
+                      />
+                      <code>{selectedOverlay.shadowColor}</code>
+                    </div>
+                  </label>
+                  <div className={styles.floatingCompactGrid}>
+                    <label className={styles.floatingField}>
+                      <span className={styles.optionMiniLabel}>강도</span>
+                      <div className={styles.rangeField}>
+                        <input
+                          className={styles.rangeInput}
+                          max={1}
+                          min={0}
+                          onChange={(event) => updateOverlay(selectedOverlay.id, { shadowOpacity: Number(event.target.value) || 0 })}
+                          step={0.05}
+                          type="range"
+                          value={selectedOverlay.shadowOpacity}
+                        />
+                        <input
+                          className={styles.input}
+                          max={1}
+                          min={0}
+                          onChange={(event) => updateOverlay(selectedOverlay.id, { shadowOpacity: Number(event.target.value) || 0 })}
+                          step={0.05}
+                          type="number"
+                          value={selectedOverlay.shadowOpacity}
+                        />
+                      </div>
+                    </label>
+
+                    <label className={styles.floatingField}>
+                      <span className={styles.optionMiniLabel}>흐림</span>
+                      <div className={styles.rangeField}>
+                        <input
+                          className={styles.rangeInput}
+                          max={40}
+                          min={0}
+                          onChange={(event) => updateOverlay(selectedOverlay.id, { shadowBlur: Number(event.target.value) || 0 })}
+                          step={1}
+                          type="range"
+                          value={selectedOverlay.shadowBlur}
+                        />
+                        <input
+                          className={styles.input}
+                          max={40}
+                          min={0}
+                          onChange={(event) => updateOverlay(selectedOverlay.id, { shadowBlur: Number(event.target.value) || 0 })}
+                          step={1}
+                          type="number"
+                          value={selectedOverlay.shadowBlur}
+                        />
+                      </div>
+                    </label>
+
+                    <label className={styles.floatingField}>
+                      <span className={styles.optionMiniLabel}>거리</span>
+                      <div className={styles.rangeField}>
+                        <input
+                          className={styles.rangeInput}
+                          max={24}
+                          min={-24}
+                          onChange={(event) => updateOverlay(selectedOverlay.id, { shadowOffsetY: Number(event.target.value) || 0 })}
+                          step={1}
+                          type="range"
+                          value={selectedOverlay.shadowOffsetY}
+                        />
+                        <input
+                          className={styles.input}
+                          max={24}
+                          min={-24}
+                          onChange={(event) => updateOverlay(selectedOverlay.id, { shadowOffsetY: Number(event.target.value) || 0 })}
+                          step={1}
+                          type="number"
+                          value={selectedOverlay.shadowOffsetY}
+                        />
+                      </div>
+                    </label>
+                  </div>
+                </>
+              ) : null}
             </div>
 
             <div className={styles.floatingField}>
@@ -763,31 +1025,39 @@ export function PdpEditor({
       width: estimatedBox.width,
       height: estimatedBox.height,
       fontSize: defaultFontSize,
-      color: "#ffffff",
-      backgroundColor: "transparent",
+      color: textColorRecommendations[0] ?? "#ffffff",
+      backgroundColor: backgroundColorRecommendations[0] ?? "#102532",
+      backgroundEnabled: false,
+      backgroundOpacity: 0.72,
+      backgroundRadius: 18,
       fontFamily: "'Pretendard', sans-serif",
       fontWeight: defaultFontWeight,
       textAlign: "left",
-      lineHeight: 1.2
+      lineHeight: 1.2,
+      shadowEnabled: true,
+      shadowColor: colorRecommendations.darkColor,
+      shadowOpacity: 0.42,
+      shadowBlur: 18,
+      shadowOffsetY: 6
     };
 
     setOverlaysBySection((current) => ({
       ...current,
-      [currentSectionIndex]: [...(current[currentSectionIndex] ?? []), newOverlay]
+      [currentSectionIndex]: [...(current[currentSectionIndex] ?? []), normalizeTextOverlay(newOverlay)]
     }));
     setSelectedOverlayId(newOverlay.id);
     setWorkbenchState((current) => ({
       ...current,
       isOpen: true
     }));
-    setNotice("텍스트를 추가했습니다. 워크벤치에서 바로 폰트와 크기를 조정해 보세요.");
+    setNotice("텍스트를 추가했습니다. 드래그하면 다른 텍스트 선에 자석처럼 맞춰 정렬할 수 있습니다.");
   };
 
   const updateOverlay = (overlayId: string, updates: Partial<TextOverlay>) => {
     setOverlaysBySection((current) => ({
       ...current,
       [currentSectionIndex]: (current[currentSectionIndex] ?? []).map((overlay) =>
-        overlay.id === overlayId ? { ...overlay, ...updates } : overlay
+        overlay.id === overlayId ? normalizeTextOverlay({ ...overlay, ...updates }) : overlay
       )
     }));
   };
@@ -858,6 +1128,35 @@ export function PdpEditor({
 
   const handleResizeStop = (overlayId: string) => {
     delete resizeSessionRef.current[overlayId];
+  };
+
+  const handleOverlayDrag = (overlay: TextOverlay, x: number, y: number) => {
+    const snapped = getSnappedOverlayPosition(
+      {
+        id: overlay.id,
+        x,
+        y,
+        width: toNumericSize(overlay.width, 320),
+        height: toNumericSize(overlay.height, 92)
+      },
+      currentOverlays
+    );
+
+    setSnapGuides({
+      vertical: snapped.verticalGuide,
+      horizontal: snapped.horizontalGuide
+    });
+    updateOverlay(overlay.id, {
+      x: snapped.x,
+      y: snapped.y
+    });
+  };
+
+  const clearSnapGuides = () => {
+    setSnapGuides({
+      vertical: null,
+      horizontal: null
+    });
   };
 
   const handleDownload = async () => {
@@ -1099,6 +1398,13 @@ export function PdpEditor({
                       src={currentSection.generatedImage}
                     />
 
+                    {snapGuides.vertical !== null ? (
+                      <div className={styles.snapGuideVertical} style={{ left: `${snapGuides.vertical}px` }} />
+                    ) : null}
+                    {snapGuides.horizontal !== null ? (
+                      <div className={styles.snapGuideHorizontal} style={{ top: `${snapGuides.horizontal}px` }} />
+                    ) : null}
+
                     {currentOverlays.map((overlay) => (
                       <Rnd
                         bounds="parent"
@@ -1124,9 +1430,16 @@ export function PdpEditor({
                           setSelectedOverlayId(overlay.id);
                         }}
                         onDragStart={() => setSelectedOverlayId(overlay.id)}
-                        onDragStop={(_, data) => updateOverlay(overlay.id, { x: data.x, y: data.y })}
+                        onDrag={(_, data) => handleOverlayDrag(overlay, data.x, data.y)}
+                        onDragStop={(_, data) => {
+                          handleOverlayDrag(overlay, data.x, data.y);
+                          clearSnapGuides();
+                        }}
                         onResize={(_, direction, ref, __, position) => handleResize(overlay, direction, ref, position)}
-                        onResizeStart={() => handleResizeStart(overlay)}
+                        onResizeStart={() => {
+                          clearSnapGuides();
+                          handleResizeStart(overlay);
+                        }}
                         onResizeStop={(_, direction, ref, __, position) => {
                           handleResize(overlay, direction, ref, position);
                           handleResizeStop(overlay.id);
@@ -1149,8 +1462,11 @@ export function PdpEditor({
                             setSelectedOverlayId(overlay.id);
                             setEditingOverlayId(overlay.id);
                           }}
-                          style={buildOverlayStyle(overlay)}
+                          style={buildOverlayShellStyle(overlay)}
                         >
+                          {overlay.backgroundEnabled ? (
+                            <div className={styles.overlayBackdrop} style={buildOverlayBackgroundStyle(overlay)} />
+                          ) : null}
                           {editingOverlayId === overlay.id ? (
                             <textarea
                               autoFocus
@@ -1163,10 +1479,13 @@ export function PdpEditor({
                                   setEditingOverlayId(null);
                                 }
                               }}
+                              style={buildOverlayTextStyle(overlay)}
                               value={overlay.text}
                             />
                           ) : (
-                            overlay.text
+                            <div className={styles.overlayTextLayer} style={buildOverlayTextStyle(overlay)}>
+                              {overlay.text}
+                            </div>
                           )}
                         </div>
                       </Rnd>
@@ -1311,25 +1630,69 @@ export function PdpEditor({
   );
 }
 
-function buildOverlayStyle(overlay: TextOverlay): CSSProperties {
+function buildOverlayShellStyle(overlay: TextOverlay): CSSProperties {
+  const padding = getOverlayPadding(overlay.fontSize);
+
+  return {
+    position: "relative",
+    width: "100%",
+    height: "100%",
+    padding: `${padding.vertical}px ${padding.horizontal}px`
+  };
+}
+
+function buildOverlayBackgroundStyle(overlay: TextOverlay): CSSProperties {
+  return {
+    backgroundColor: toRgba(overlay.backgroundColor, overlay.backgroundOpacity),
+    borderRadius: `${overlay.backgroundRadius}px`
+  };
+}
+
+function buildOverlayTextStyle(overlay: TextOverlay): CSSProperties {
   return {
     width: "100%",
     height: "100%",
-    padding: "6px 10px",
     color: overlay.color,
-    backgroundColor: overlay.backgroundColor,
     fontFamily: overlay.fontFamily,
     fontSize: `${overlay.fontSize}px`,
     fontWeight: overlay.fontWeight,
     lineHeight: overlay.lineHeight,
     textAlign: overlay.textAlign,
-    display: "flex",
-    alignItems: "flex-start",
-    justifyContent:
-      overlay.textAlign === "center" ? "center" : overlay.textAlign === "right" ? "flex-end" : "flex-start",
-    borderRadius: "10px",
     whiteSpace: "pre-wrap",
-    wordBreak: "keep-all"
+    wordBreak: "keep-all",
+    textShadow: overlay.shadowEnabled
+      ? `0px ${overlay.shadowOffsetY}px ${overlay.shadowBlur}px ${toRgba(overlay.shadowColor, overlay.shadowOpacity)}`
+      : "none"
+  };
+}
+
+function normalizeOverlayRecord(record: Record<number, TextOverlay[]>) {
+  return Object.fromEntries(
+    Object.entries(record).map(([key, overlays]) => [Number(key), overlays.map((overlay) => normalizeTextOverlay(overlay))])
+  ) as Record<number, TextOverlay[]>;
+}
+
+function normalizeTextOverlay(overlay: Partial<TextOverlay> & Pick<TextOverlay, "id" | "text" | "x" | "y" | "width" | "height" | "fontSize" | "color" | "fontFamily" | "fontWeight" | "textAlign" | "lineHeight" | "backgroundColor">): TextOverlay {
+  const hasLegacyBackground = Boolean(overlay.backgroundColor && overlay.backgroundColor !== "transparent");
+
+  return {
+    ...overlay,
+    backgroundColor: overlay.backgroundColor === "transparent" ? "#102532" : overlay.backgroundColor,
+    backgroundEnabled: overlay.backgroundEnabled ?? hasLegacyBackground,
+    backgroundOpacity: overlay.backgroundOpacity ?? 0.72,
+    backgroundRadius: overlay.backgroundRadius ?? 18,
+    shadowEnabled: overlay.shadowEnabled ?? false,
+    shadowColor: overlay.shadowColor ?? "#102532",
+    shadowOpacity: overlay.shadowOpacity ?? 0.4,
+    shadowBlur: overlay.shadowBlur ?? 18,
+    shadowOffsetY: overlay.shadowOffsetY ?? 6
+  };
+}
+
+function getOverlayPadding(fontSize: number) {
+  return {
+    horizontal: clampValue(Math.round(fontSize * 0.32), 10, 24),
+    vertical: clampValue(Math.round(fontSize * 0.18), 8, 18)
   };
 }
 
@@ -1393,6 +1756,277 @@ function createTextMeasure(options: { fontSize: number; fontWeight: string; font
 
   context.font = `${options.fontWeight} ${options.fontSize}px ${options.fontFamily}`;
   return (text: string) => context.measureText(text).width;
+}
+
+function getSnappedOverlayPosition(
+  moving: { id: string; x: number; y: number; width: number; height: number },
+  overlays: TextOverlay[]
+) {
+  let nextX = moving.x;
+  let nextY = moving.y;
+  let bestVerticalGuide: number | null = null;
+  let bestHorizontalGuide: number | null = null;
+  let closestVertical = SNAP_THRESHOLD + 1;
+  let closestHorizontal = SNAP_THRESHOLD + 1;
+
+  const movingVerticalAnchors = [
+    { guide: moving.x, nextPosition: moving.x },
+    { guide: moving.x + moving.width / 2, nextPosition: moving.x },
+    { guide: moving.x + moving.width, nextPosition: moving.x }
+  ];
+  const movingHorizontalAnchors = [
+    { guide: moving.y, nextPosition: moving.y },
+    { guide: moving.y + moving.height / 2, nextPosition: moving.y },
+    { guide: moving.y + moving.height, nextPosition: moving.y }
+  ];
+
+  overlays
+    .filter((overlay) => overlay.id !== moving.id)
+    .forEach((overlay) => {
+      const width = toNumericSize(overlay.width, 320);
+      const height = toNumericSize(overlay.height, 92);
+      const candidateVerticalGuides = [overlay.x, overlay.x + width / 2, overlay.x + width];
+      const candidateHorizontalGuides = [overlay.y, overlay.y + height / 2, overlay.y + height];
+
+      movingVerticalAnchors.forEach((anchor, anchorIndex) => {
+        candidateVerticalGuides.forEach((guide) => {
+          const distance = Math.abs(anchor.guide - guide);
+          if (distance < closestVertical && distance <= SNAP_THRESHOLD) {
+            closestVertical = distance;
+            bestVerticalGuide = guide;
+            if (anchorIndex === 0) {
+              nextX = guide;
+            } else if (anchorIndex === 1) {
+              nextX = guide - moving.width / 2;
+            } else {
+              nextX = guide - moving.width;
+            }
+          }
+        });
+      });
+
+      movingHorizontalAnchors.forEach((anchor, anchorIndex) => {
+        candidateHorizontalGuides.forEach((guide) => {
+          const distance = Math.abs(anchor.guide - guide);
+          if (distance < closestHorizontal && distance <= SNAP_THRESHOLD) {
+            closestHorizontal = distance;
+            bestHorizontalGuide = guide;
+            if (anchorIndex === 0) {
+              nextY = guide;
+            } else if (anchorIndex === 1) {
+              nextY = guide - moving.height / 2;
+            } else {
+              nextY = guide - moving.height;
+            }
+          }
+        });
+      });
+    });
+
+  return {
+    x: Math.round(nextX),
+    y: Math.round(nextY),
+    verticalGuide: bestVerticalGuide,
+    horizontalGuide: bestHorizontalGuide
+  };
+}
+
+async function extractImageColorRecommendations(imageSrc: string): Promise<ImageColorRecommendations> {
+  if (typeof document === "undefined") {
+    return DEFAULT_COLOR_RECOMMENDATIONS;
+  }
+
+  try {
+    const image = await loadImage(imageSrc);
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+
+    if (!context) {
+      return DEFAULT_COLOR_RECOMMENDATIONS;
+    }
+
+    const width = 48;
+    const height = Math.max(48, Math.round((image.naturalHeight / Math.max(image.naturalWidth, 1)) * 48));
+    canvas.width = width;
+    canvas.height = height;
+    context.drawImage(image, 0, 0, width, height);
+
+    const { data } = context.getImageData(0, 0, width, height);
+    const buckets = new Map<string, { count: number; r: number; g: number; b: number }>();
+
+    for (let index = 0; index < data.length; index += 16) {
+      const alpha = data[index + 3];
+      if (alpha < 24) {
+        continue;
+      }
+
+      const r = data[index];
+      const g = data[index + 1];
+      const b = data[index + 2];
+      const key = `${Math.round(r / 32)}-${Math.round(g / 32)}-${Math.round(b / 32)}`;
+      const current = buckets.get(key) ?? { count: 0, r: 0, g: 0, b: 0 };
+      current.count += 1;
+      current.r += r;
+      current.g += g;
+      current.b += b;
+      buckets.set(key, current);
+    }
+
+    const swatches = Array.from(buckets.values())
+      .map((bucket) => ({
+        count: bucket.count,
+        color: {
+          r: Math.round(bucket.r / bucket.count),
+          g: Math.round(bucket.g / bucket.count),
+          b: Math.round(bucket.b / bucket.count)
+        }
+      }))
+      .sort((left, right) => right.count - left.count);
+
+    if (!swatches.length) {
+      return DEFAULT_COLOR_RECOMMENDATIONS;
+    }
+
+    const dominant = swatches[0]?.color ?? hexToRgb(DEFAULT_COLOR_RECOMMENDATIONS.darkColor);
+    const accent =
+      swatches
+        .slice(0, 8)
+        .sort((left, right) => getSaturation(right.color) - getSaturation(left.color))[0]?.color ?? dominant;
+    const dark = swatches.find((swatch) => getRelativeLuminance(swatch.color) < 0.34)?.color ?? darkenRgb(dominant, 0.58);
+    const light = swatches.find((swatch) => getRelativeLuminance(swatch.color) > 0.72)?.color ?? lightenRgb(dominant, 0.68);
+
+    const accentHex = rgbToHex(boostColorPresence(accent));
+    const darkHex = rgbToHex(darkenRgb(dark, 0.08));
+    const lightHex = rgbToHex(lightenRgb(light, 0.04));
+
+    return {
+      textColors: uniqueColors([
+        getRelativeLuminance(dominant) < 0.48 ? "#F9F7F1" : "#102532",
+        lightHex,
+        darkHex,
+        accentHex
+      ]),
+      backgroundColors: uniqueColors([
+        darkHex,
+        rgbToHex(mixRgb(dark, accent, 0.28)),
+        rgbToHex(mixRgb(light, dark, 0.2)),
+        rgbToHex(mixRgb(accent, light, 0.42))
+      ]),
+      accentColor: accentHex,
+      darkColor: darkHex,
+      lightColor: lightHex
+    };
+  } catch {
+    return DEFAULT_COLOR_RECOMMENDATIONS;
+  }
+}
+
+function sortColorsByContrast(colors: string[], against: string | null) {
+  if (!against) {
+    return uniqueColors(colors);
+  }
+
+  const target = hexToRgb(against);
+  return uniqueColors(colors).sort(
+    (left, right) => contrastScore(hexToRgb(right), target) - contrastScore(hexToRgb(left), target)
+  );
+}
+
+function uniqueColors(colors: string[]) {
+  return Array.from(new Set(colors.map((color) => color.toLowerCase())));
+}
+
+function contrastScore(left: { r: number; g: number; b: number }, right: { r: number; g: number; b: number }) {
+  return Math.abs(getRelativeLuminance(left) - getRelativeLuminance(right));
+}
+
+function getRelativeLuminance(color: { r: number; g: number; b: number }) {
+  const [r, g, b] = [color.r, color.g, color.b].map((channel) => {
+    const value = channel / 255;
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function getSaturation(color: { r: number; g: number; b: number }) {
+  const [r, g, b] = [color.r / 255, color.g / 255, color.b / 255];
+  return Math.max(r, g, b) - Math.min(r, g, b);
+}
+
+function lightenRgb(color: { r: number; g: number; b: number }, amount: number) {
+  return {
+    r: Math.round(color.r + (255 - color.r) * amount),
+    g: Math.round(color.g + (255 - color.g) * amount),
+    b: Math.round(color.b + (255 - color.b) * amount)
+  };
+}
+
+function darkenRgb(color: { r: number; g: number; b: number }, amount: number) {
+  return {
+    r: Math.round(color.r * (1 - amount)),
+    g: Math.round(color.g * (1 - amount)),
+    b: Math.round(color.b * (1 - amount))
+  };
+}
+
+function mixRgb(left: { r: number; g: number; b: number }, right: { r: number; g: number; b: number }, ratio: number) {
+  return {
+    r: Math.round(left.r * (1 - ratio) + right.r * ratio),
+    g: Math.round(left.g * (1 - ratio) + right.g * ratio),
+    b: Math.round(left.b * (1 - ratio) + right.b * ratio)
+  };
+}
+
+function boostColorPresence(color: { r: number; g: number; b: number }) {
+  const saturation = getSaturation(color);
+  if (saturation > 0.3) {
+    return color;
+  }
+
+  const max = Math.max(color.r, color.g, color.b);
+  const next = { ...color };
+  if (max === color.r) {
+    next.r = clampValue(next.r + 28, 0, 255);
+  } else if (max === color.g) {
+    next.g = clampValue(next.g + 28, 0, 255);
+  } else {
+    next.b = clampValue(next.b + 28, 0, 255);
+  }
+  return next;
+}
+
+function hexToRgb(value: string) {
+  const normalized = value.replace("#", "");
+  const hex = normalized.length === 3 ? normalized.split("").map((segment) => `${segment}${segment}`).join("") : normalized;
+  const numeric = Number.parseInt(hex, 16);
+
+  return {
+    r: (numeric >> 16) & 255,
+    g: (numeric >> 8) & 255,
+    b: numeric & 255
+  };
+}
+
+function rgbToHex(color: { r: number; g: number; b: number }) {
+  return `#${[color.r, color.g, color.b]
+    .map((channel) => clampValue(channel, 0, 255).toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+function toRgba(hex: string, alpha: number) {
+  const { r, g, b } = hexToRgb(hex);
+  return `rgba(${r}, ${g}, ${b}, ${clampValue(alpha, 0, 1)})`;
+}
+
+function loadImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("이미지 색상을 분석하지 못했습니다."));
+    image.src = src;
+  });
 }
 
 function formatSavedAt(value: string) {

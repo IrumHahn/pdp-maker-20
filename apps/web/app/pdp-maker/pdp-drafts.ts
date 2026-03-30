@@ -20,10 +20,18 @@ export interface TextOverlay {
   fontSize: number;
   color: string;
   backgroundColor: string;
+  backgroundEnabled: boolean;
+  backgroundOpacity: number;
+  backgroundRadius: number;
   fontFamily: string;
   fontWeight: string;
   textAlign: OverlayTextAlign;
   lineHeight: number;
+  shadowEnabled: boolean;
+  shadowColor: string;
+  shadowOpacity: number;
+  shadowBlur: number;
+  shadowOffsetY: number;
 }
 
 export interface FloatingWorkbenchState {
