@@ -1,48 +1,17 @@
 "use client";
 
 import { type DragEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  AlertCircle,
-  CheckCircle2,
-  Clock3,
-  Copy,
-  FolderOpen,
-  Loader2,
-  RectangleHorizontal,
-  RectangleVertical,
-  Smartphone,
-  Sparkles,
-  Square,
-  Trash2,
-  Upload,
-  Wand2
-} from "lucide-react";
+import { AlertCircle, Clock3, Copy, FolderOpen, Loader2, RectangleHorizontal, RectangleVertical, Settings2, Smartphone, Sparkles, Square, Trash2, Upload, Wand2 } from "lucide-react";
 import type { AspectRatio, GeneratedResult, PdpAnalyzeResponse, ReferenceModelUsage } from "@runacademy/shared";
 import type { PdpAppState, PdpDraftSummary, PdpEditorDraftState, PreparedImageDraft } from "./pdp-drafts";
 import { deletePdpDraft, getPdpDraft, listPdpDrafts, savePdpDraft } from "./pdp-drafts";
 import { PdpEditor } from "./PdpEditor";
+import { PdpSettingsSheet } from "./PdpSettingsSheet";
 import styles from "./pdp-maker.module.css";
+import { loadPdpClientSettings, savePdpClientSettings, type PdpClientSettings } from "./pdp-settings";
 import { RATIO_OPTIONS, TONE_OPTIONS, apiJson, prepareImageFile } from "./pdp-utils";
 
 type PreparedImage = PreparedImageDraft;
-
-const WORKFLOW_ITEMS = [
-  {
-    step: "01",
-    title: "제품 업로드",
-    description: "원본 이미지 한 장과 간단한 상품 정보를 넣으면 바로 시작할 수 있습니다."
-  },
-  {
-    step: "02",
-    title: "AI 구조 설계",
-    description: "첫 분석에서 블루프린트와 첫 섹션 히어로컷을 함께 생성합니다."
-  },
-  {
-    step: "03",
-    title: "섹션 편집",
-    description: "카피를 얹고 이미지를 다시 생성하면서 실제 운영 컷으로 다듬습니다."
-  }
-];
 
 export function PdpMakerClient() {
   const [appState, setAppState] = useState<PdpAppState>("upload");
@@ -69,13 +38,19 @@ export function PdpMakerClient() {
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [manualSaveToastToken, setManualSaveToastToken] = useState(0);
   const [isDirty, setIsDirty] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [clientSettings, setClientSettings] = useState<PdpClientSettings>(() => loadPdpClientSettings());
   const isApplyingDraftRef = useRef(false);
   const saveInFlightRef = useRef(false);
 
   const selectedRatio = useMemo(() => RATIO_OPTIONS.find((option) => option.value === aspectRatio) ?? RATIO_OPTIONS[2], [aspectRatio]);
   const selectedToneLabel = desiredTone || "AI 자동 추천";
+  const preparedImageDisplayName = preparedImage ? formatCompactFileName(preparedImage.fileName) : "";
+  const modelImageDisplayName = modelImage ? formatCompactFileName(modelImage.fileName) : "";
   const hasDraftContent = Boolean(preparedImage || modelImage || result || additionalInfo.trim() || desiredTone.trim() || activeDraftId);
-  const canAnalyze = Boolean(preparedImage && (!modelImage || modelImageUsage));
+  const hasAvailableGeminiKey = Boolean(clientSettings.customGeminiApiKey.trim());
+  const canAnalyze = Boolean(preparedImage && (!modelImage || modelImageUsage) && hasAvailableGeminiKey);
+  const apiConnectionLabel = clientSettings.customGeminiApiKey ? "개인 API 키" : "키 필요";
 
   const refreshDrafts = useCallback(async () => {
     setIsLoadingDrafts(true);
@@ -349,6 +324,11 @@ export function PdpMakerClient() {
       return;
     }
 
+    if (!hasAvailableGeminiKey) {
+      setErrorMessage("설정 메뉴에서 본인 Gemini API 키를 먼저 입력해 주세요.");
+      return;
+    }
+
     if (modelImage && !modelImageUsage) {
       setErrorMessage("모델 이미지를 사용할 방식을 먼저 선택해 주세요.");
       return;
@@ -403,23 +383,49 @@ export function PdpMakerClient() {
     resetWorkspace();
   };
 
+  const handleGoToMain = async () => {
+    const canContinue = await confirmSaveBeforeLeaving();
+    if (!canContinue) {
+      return;
+    }
+
+    resetWorkspace();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const handleSaveSettings = (nextSettings: PdpClientSettings) => {
+    savePdpClientSettings(nextSettings);
+    setClientSettings(nextSettings);
+    setNotice("개인 Gemini API 키를 저장했습니다. 이 브라우저에서는 입력한 키로 바로 작업할 수 있습니다.");
+  };
+
   if (appState === "editor" && result) {
     return (
-      <PdpEditor
-        key={`${activeDraftId ?? "new"}-${editorSessionKey}`}
-        aspectRatio={aspectRatio}
-        desiredTone={desiredTone}
-        initialDraftState={editorDraftState}
-        initialResult={result}
-        lastSavedAt={lastSavedAt}
-        manualSaveToastToken={manualSaveToastToken}
-        onDraftStateChange={setEditorDraftState}
-        onManualSave={() => void persistDraft("manual", { showToast: true })}
-        onReset={() => void handleReset()}
-        referenceModelImage={modelImage}
-        referenceModelUsage={modelImageUsage}
-        saveState={saveState}
-      />
+      <>
+        <PdpEditor
+          key={`${activeDraftId ?? "new"}-${editorSessionKey}`}
+          aspectRatio={aspectRatio}
+          desiredTone={desiredTone}
+          initialDraftState={editorDraftState}
+          initialResult={result}
+          lastSavedAt={lastSavedAt}
+          manualSaveToastToken={manualSaveToastToken}
+          onDraftStateChange={setEditorDraftState}
+          onManualSave={() => void persistDraft("manual", { showToast: true })}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+          onReset={() => void handleReset()}
+          apiConnectionLabel={apiConnectionLabel}
+          referenceModelImage={modelImage}
+          referenceModelUsage={modelImageUsage}
+          saveState={saveState}
+        />
+        <PdpSettingsSheet
+          onOpenChange={setIsSettingsOpen}
+          onSave={handleSaveSettings}
+          open={isSettingsOpen}
+          settings={clientSettings}
+        />
+      </>
     );
   }
 
@@ -428,28 +434,19 @@ export function PdpMakerClient() {
       <section className={styles.shell}>
         <header className={styles.toolHeader}>
           <div className={styles.toolHeaderCopy}>
-            <h1 className={styles.toolTitle}>한이룸의 상세페이지 마법사 2.0</h1>
-            <p className={styles.toolDescription}>
-              원본 제품 이미지를 올리면 AI가 상세페이지 구조와 첫 섹션 컷을 설계하고, 바로 편집 가능한 작업 상태로 넘겨줍니다.
-            </p>
+            <h1 className={styles.toolTitle}>
+              <button className={styles.brandHomeButton} onClick={() => void handleGoToMain()} type="button">
+                한이룸의 상세페이지 마법사 2.0
+              </button>
+            </h1>
           </div>
 
-          <div className={styles.statusStrip}>
-            <article className={styles.statusCard}>
-              <span className={styles.statusCardLabel}>입력</span>
-              <strong>제품 이미지 1장</strong>
-              <small>JPG, PNG, WEBP</small>
-            </article>
-            <article className={styles.statusCard}>
-              <span className={styles.statusCardLabel}>출력</span>
-              <strong>블루프린트 + 첫 컷</strong>
-              <small>첫 분석에서 바로 생성</small>
-            </article>
-            <article className={styles.statusCard}>
-              <span className={styles.statusCardLabel}>편집</span>
-              <strong>섹션별 재생성</strong>
-              <small>텍스트 오버레이와 다운로드</small>
-            </article>
+          <div className={styles.toolHeaderActions}>
+            <span className={styles.metaPill}>API {apiConnectionLabel}</span>
+            <button className={`${styles.secondaryButton} ${styles.headerActionButton}`} onClick={() => setIsSettingsOpen(true)} type="button">
+              <Settings2 size={16} />
+              설정
+            </button>
           </div>
         </header>
 
@@ -477,14 +474,22 @@ export function PdpMakerClient() {
                 {drafts.map((draft) => (
                   <article className={styles.savedDraftCard} key={draft.id}>
                     <div className={styles.savedDraftPreview}>
-                      {draft.thumbnailUrl ? <img alt={draft.title} src={draft.thumbnailUrl} /> : <Sparkles size={18} />}
+                      <div className={styles.savedDraftPreviewFrame}>
+                        {draft.thumbnailUrl ? <img alt={draft.title} src={draft.thumbnailUrl} /> : <Sparkles size={18} />}
+                      </div>
+                      <div className={styles.savedDraftPreviewMeta}>
+                        <span className={styles.savedDraftStageBadge}>{draft.stageLabel}</span>
+                        <span className={styles.savedDraftAspectBadge}>{draft.aspectRatio}</span>
+                      </div>
                     </div>
                     <div className={styles.savedDraftCopy}>
-                      <strong>{draft.title}</strong>
-                      <p>{draft.stageLabel}</p>
+                      <div className={styles.savedDraftHeaderRow}>
+                        <strong title={draft.title}>{draft.title}</strong>
+                        <span className={styles.savedDraftCountBadge}>{draft.sectionCount}섹션</span>
+                      </div>
+                      <p className={styles.savedDraftTimestamp}>{formatSavedDraftDate(draft.updatedAt)}</p>
                       <div className={styles.savedDraftMetaRow}>
-                        <span>{draft.aspectRatio}</span>
-                        <span>{draft.sectionCount}섹션</span>
+                        <span>최근 저장</span>
                         <span>{formatSavedDraftDate(draft.updatedAt)}</span>
                       </div>
                     </div>
@@ -538,7 +543,7 @@ export function PdpMakerClient() {
 
               <UploadDropzone
                 description="드래그 앤 드롭 또는 클릭으로 JPG, PNG, WEBP 파일을 선택할 수 있습니다."
-                hint={preparedImage?.fileName ? `선택됨: ${preparedImage.fileName}` : "권장 최대 10MB"}
+                hint={preparedImage?.fileName ? `선택됨: ${preparedImageDisplayName}` : "권장 최대 10MB"}
                 onSelect={handlePreparedImage}
                 selectedFileName={preparedImage?.fileName}
                 title="제품 이미지를 업로드하세요"
@@ -550,7 +555,7 @@ export function PdpMakerClient() {
                     <img alt={preparedImage.fileName} className={styles.selectedImage} src={preparedImage.previewUrl} />
                   </div>
                   <div className={styles.uploadMeta}>
-                    <strong>{preparedImage.fileName}</strong>
+                    <strong title={preparedImage.fileName}>{preparedImageDisplayName}</strong>
                     <div className={styles.metaList}>
                       <div className={styles.metaItem}>
                         <span>전송 포맷</span>
@@ -611,7 +616,7 @@ export function PdpMakerClient() {
                 <UploadDropzone
                   compact
                   description="선택 사항입니다. 업로드한 인물 이미지는 모델컷 생성 시 참조 이미지로 사용됩니다."
-                  hint={modelImage?.fileName ? `선택됨: ${modelImage.fileName}` : "권장 최대 10MB"}
+                  hint={modelImage?.fileName ? `선택됨: ${modelImageDisplayName}` : "권장 최대 10MB"}
                   onSelect={handleModelImage}
                   selectedFileName={modelImage?.fileName}
                   title="모델 이미지를 업로드하세요"
@@ -623,7 +628,7 @@ export function PdpMakerClient() {
                       <img alt={modelImage.fileName} className={styles.selectedImage} src={modelImage.previewUrl} />
                     </div>
                     <div className={styles.uploadMeta}>
-                      <strong>{modelImage.fileName}</strong>
+                      <strong title={modelImage.fileName}>{modelImageDisplayName}</strong>
                       <div className={styles.metaList}>
                         <div className={styles.metaItem}>
                           <span>적용 대상</span>
@@ -826,19 +831,14 @@ export function PdpMakerClient() {
           </div>
         )}
 
-        <section className={styles.workflowStrip}>
-          {WORKFLOW_ITEMS.map((item) => (
-            <article className={styles.workflowCard} key={item.step}>
-              <span className={styles.workflowStep}>{item.step}</span>
-              <div>
-                <h3>{item.title}</h3>
-                <p>{item.description}</p>
-              </div>
-              <CheckCircle2 size={18} />
-            </article>
-          ))}
-        </section>
       </section>
+
+      <PdpSettingsSheet
+        onOpenChange={setIsSettingsOpen}
+        onSave={handleSaveSettings}
+        open={isSettingsOpen}
+        settings={clientSettings}
+      />
     </main>
   );
 }
@@ -965,4 +965,24 @@ function formatSavedDraftDate(value: string) {
     hour: "numeric",
     minute: "2-digit"
   }).format(date);
+}
+
+function formatCompactFileName(fileName: string, maxBaseLength = 30) {
+  const trimmed = fileName.trim();
+  if (!trimmed) {
+    return fileName;
+  }
+
+  const lastDotIndex = trimmed.lastIndexOf(".");
+  const hasExtension = lastDotIndex > 0 && lastDotIndex < trimmed.length - 1;
+  const extension = hasExtension ? trimmed.slice(lastDotIndex) : "";
+  const baseName = hasExtension ? trimmed.slice(0, lastDotIndex) : trimmed;
+
+  if (baseName.length <= maxBaseLength) {
+    return trimmed;
+  }
+
+  const leadingLength = Math.max(14, Math.floor(maxBaseLength * 0.58));
+  const trailingLength = Math.max(8, maxBaseLength - leadingLength);
+  return `${baseName.slice(0, leadingLength)}…${baseName.slice(-trailingLength)}${extension}`;
 }

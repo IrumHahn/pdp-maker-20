@@ -1,4 +1,5 @@
 import type { AspectRatio } from "@runacademy/shared";
+import { resolveGeminiApiKeyHeaderValue } from "./pdp-settings";
 
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4000/v1";
 
@@ -27,12 +28,17 @@ export const TONE_OPTIONS = [
 ];
 
 export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers ?? {});
+  headers.set("Content-Type", "application/json");
+
+  const customGeminiApiKey = resolveGeminiApiKeyHeaderValue();
+  if (customGeminiApiKey) {
+    headers.set("X-Gemini-Api-Key", customGeminiApiKey);
+  }
+
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {})
-    }
+    headers
   });
 
   return response.json() as Promise<T>;

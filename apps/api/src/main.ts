@@ -10,53 +10,10 @@ import { AdminTicketsController } from "./modules/admin/tickets/tickets.controll
 import { ChatController } from "./modules/chat/chat.controller";
 import { EcommerceController } from "./modules/ecommerce/ecommerce.controller";
 import { PdpController } from "./modules/pdp/pdp.controller";
-import { SourcingService } from "./modules/sourcing/sourcing.service";
-import { SourcingStoreService } from "./modules/sourcing/sourcing.store";
-import { TrendService } from "./modules/trends/trend.service";
 import { TennisService } from "./modules/tennis/tennis.service";
 import { PrismaService } from "./prisma/prisma.service";
-import type { SourcingIntakeInput } from "./modules/sourcing/sourcing.types";
 import type { TennisSourceId } from "@runacademy/shared";
-import type { PdpAnalyzeRequest, PdpGenerateImageRequest, TrendProfileInput } from "@runacademy/shared";
-
-interface StartRunRequest {
-  intakeId: string;
-}
-
-interface LocalMarketRequest {
-  url?: string;
-  pageSnapshotText?: string;
-  reviewSnapshotText?: string;
-}
-
-interface GoogleConnectStartRequest {
-  redirectUri?: string;
-}
-
-interface GoogleConnectCompleteRequest {
-  code?: string;
-  redirectUri?: string;
-  email?: string;
-  displayName?: string;
-}
-
-interface DraftInquiryRequest {
-  guardrails?: {
-    targetUnitPriceUsd?: number;
-    maxMoq?: number;
-    askSample?: boolean;
-    desiredIncoterm?: string;
-    bannedPhrases?: string[];
-  };
-}
-
-interface DraftReplyRequest {
-  supplierReplyText?: string;
-}
-
-interface TrendBackfillRequest {
-  profileId: string;
-}
+import type { PdpAnalyzeRequest, PdpGenerateImageRequest } from "@runacademy/shared";
 
 function loadEnvironment() {
   const envLoader = (
@@ -89,10 +46,6 @@ const adminChatsController = new AdminChatsController();
 const adminTicketsController = new AdminTicketsController();
 const ecommerceController = new EcommerceController();
 const pdpController = new PdpController();
-const prisma = process.env.DATABASE_URL?.trim() ? new PrismaService() : undefined;
-const sourcingStore = new SourcingStoreService(prisma);
-const sourcingService = new SourcingService(sourcingStore);
-const trendService = new TrendService(sourcingStore);
 const tennisService = new TennisService();
 
 const server = createServer(async (req, res) => {
@@ -209,156 +162,13 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && pathname === "/v1/pdp/analyze") {
       const body = await readJsonBody<PdpAnalyzeRequest>(req);
-      respondJson(res, 200, await pdpController.analyze(body));
+      respondJson(res, 200, await pdpController.analyze(body, readGeminiApiKeyOverride(req)));
       return;
     }
 
     if (req.method === "POST" && pathname === "/v1/pdp/images") {
       const body = await readJsonBody<PdpGenerateImageRequest>(req);
-      respondJson(res, 200, await pdpController.generateImage(body));
-      return;
-    }
-
-    if (req.method === "POST" && pathname === "/v1/sourcing/intakes") {
-      const body = await readJsonBody<SourcingIntakeInput>(req);
-      respondJson(res, 200, await sourcingService.createIntake(body));
-      return;
-    }
-
-    if (req.method === "POST" && pathname === "/v1/sourcing/runs") {
-      const body = await readJsonBody<StartRunRequest>(req);
-      respondJson(res, 200, await sourcingService.startRun(body.intakeId));
-      return;
-    }
-
-    const runMatch = pathname.match(/^\/v1\/sourcing\/runs\/([^/]+)$/);
-    if (req.method === "GET" && runMatch) {
-      respondJson(res, 200, await sourcingService.getRun(runMatch[1]));
-      return;
-    }
-
-    if (req.method === "GET" && pathname === "/v1/sourcing/admin/review-board") {
-      respondJson(res, 200, await sourcingService.getAdminReviewBoard());
-      return;
-    }
-
-    const candidateMatch = pathname.match(/^\/v1\/sourcing\/candidates\/([^/]+)$/);
-    if (req.method === "GET" && candidateMatch) {
-      respondJson(res, 200, await sourcingService.getCandidate(candidateMatch[1]));
-      return;
-    }
-
-    const localMarketMatch = pathname.match(/^\/v1\/sourcing\/candidates\/([^/]+)\/local-market$/);
-    if (req.method === "POST" && localMarketMatch) {
-      const body = await readJsonBody<LocalMarketRequest>(req);
-      respondJson(res, 200, await sourcingService.refreshCompetitionReport(localMarketMatch[1], body));
-      return;
-    }
-
-    const suppliersMatch = pathname.match(/^\/v1\/sourcing\/candidates\/([^/]+)\/suppliers$/);
-    if (req.method === "POST" && suppliersMatch) {
-      respondJson(res, 200, await sourcingService.refreshSuppliers(suppliersMatch[1]));
-      return;
-    }
-
-    const competitionMatch = pathname.match(/^\/v1\/sourcing\/candidates\/([^/]+)\/competition-report\/refresh$/);
-    if (req.method === "POST" && competitionMatch) {
-      const body = await readJsonBody<LocalMarketRequest>(req);
-      respondJson(res, 200, await sourcingService.refreshCompetitionReport(competitionMatch[1], body));
-      return;
-    }
-
-    const supplierRefreshMatch = pathname.match(/^\/v1\/sourcing\/candidates\/([^/]+)\/suppliers\/refresh$/);
-    if (req.method === "POST" && supplierRefreshMatch) {
-      respondJson(res, 200, await sourcingService.refreshSuppliers(supplierRefreshMatch[1]));
-      return;
-    }
-
-    if (req.method === "GET" && pathname === "/v1/sourcing/mailboxes/google") {
-      respondJson(res, 200, await sourcingService.getGoogleMailboxConnection());
-      return;
-    }
-
-    if (req.method === "POST" && pathname === "/v1/sourcing/mailboxes/google/connect/start") {
-      const body = await readJsonBody<GoogleConnectStartRequest>(req);
-      respondJson(res, 200, await sourcingService.startGoogleConnect(body));
-      return;
-    }
-
-    if (req.method === "POST" && pathname === "/v1/sourcing/mailboxes/google/connect/complete") {
-      const body = await readJsonBody<GoogleConnectCompleteRequest>(req);
-      respondJson(res, 200, await sourcingService.completeGoogleConnect(body));
-      return;
-    }
-
-    const draftMatch = pathname.match(/^\/v1\/sourcing\/negotiations\/([^/]+)\/draft-inquiry$/);
-    if (req.method === "POST" && draftMatch) {
-      const body = await readJsonBody<DraftInquiryRequest>(req);
-      respondJson(res, 200, await sourcingService.draftInquiry(draftMatch[1], body));
-      return;
-    }
-
-    const approveSendMatch = pathname.match(/^\/v1\/sourcing\/negotiations\/([^/]+)\/approve-send$/);
-    if (req.method === "POST" && approveSendMatch) {
-      respondJson(res, 200, await sourcingService.approveSend(approveSendMatch[1]));
-      return;
-    }
-
-    const replyDraftMatch = pathname.match(/^\/v1\/sourcing\/negotiations\/([^/]+)\/draft-reply$/);
-    if (req.method === "POST" && replyDraftMatch) {
-      const body = await readJsonBody<DraftReplyRequest>(req);
-      respondJson(res, 200, await sourcingService.draftReply(replyDraftMatch[1], body));
-      return;
-    }
-
-    if (req.method === "GET" && pathname === "/v1/trends/admin/board") {
-      respondJson(res, 200, await trendService.getAdminBoard());
-      return;
-    }
-
-    if (req.method === "GET" && pathname === "/v1/trends/profiles") {
-      respondJson(res, 200, await trendService.listProfiles());
-      return;
-    }
-
-    if (req.method === "POST" && pathname === "/v1/trends/profiles") {
-      const body = await readJsonBody<TrendProfileInput>(req);
-      respondJson(res, 200, await trendService.createProfile(body));
-      return;
-    }
-
-    const trendCategoryMatch = pathname.match(/^\/v1\/trends\/categories\/([^/]+)$/);
-    if (req.method === "GET" && trendCategoryMatch) {
-      respondJson(res, 200, await trendService.fetchCategoryChildren(Number(trendCategoryMatch[1])));
-      return;
-    }
-
-    const trendRunMatch = pathname.match(/^\/v1\/trends\/runs\/([^/]+)$/);
-    if (req.method === "GET" && trendRunMatch) {
-      respondJson(res, 200, await trendService.getRun(trendRunMatch[1]));
-      return;
-    }
-
-    const trendRetryMatch = pathname.match(/^\/v1\/trends\/runs\/([^/]+)\/retry-failures$/);
-    if (req.method === "POST" && trendRetryMatch) {
-      respondJson(res, 200, await trendService.retryFailures(trendRetryMatch[1]));
-      return;
-    }
-
-    const trendBackfillMatch = pathname.match(/^\/v1\/trends\/profiles\/([^/]+)\/backfill$/);
-    if (req.method === "POST" && trendBackfillMatch) {
-      respondJson(res, 200, await trendService.startBackfill(trendBackfillMatch[1]));
-      return;
-    }
-
-    const trendSyncMatch = pathname.match(/^\/v1\/trends\/profiles\/([^/]+)\/sync-sheet$/);
-    if (req.method === "POST" && trendSyncMatch) {
-      respondJson(res, 200, await trendService.syncProfile(trendSyncMatch[1]));
-      return;
-    }
-
-    if (req.method === "POST" && pathname === "/v1/trends/worker/process-next") {
-      respondJson(res, 200, await trendService.processNextQueuedRun());
+      respondJson(res, 200, await pdpController.generateImage(body, readGeminiApiKeyOverride(req)));
       return;
     }
 
@@ -439,7 +249,12 @@ server.listen(port, "127.0.0.1", () => {
 function applyCors(res: ServerResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Gemini-Api-Key");
+}
+
+function readGeminiApiKeyOverride(req: IncomingMessage) {
+  const headerValue = req.headers["x-gemini-api-key"];
+  return Array.isArray(headerValue) ? headerValue[0] : headerValue;
 }
 
 async function readJsonBody<T>(req: IncomingMessage): Promise<T> {

@@ -3,6 +3,7 @@
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import html2canvas from "html2canvas";
+import JSZip from "jszip";
 import {
   AlignCenter,
   AlignLeft,
@@ -56,9 +57,11 @@ interface PdpEditorProps {
   initialDraftState?: PdpEditorDraftState | null;
   lastSavedAt?: string | null;
   manualSaveToastToken?: number;
+  onOpenSettings?: () => void;
   onReset: () => void;
   onDraftStateChange?: (draftState: PdpEditorDraftState) => void;
   onManualSave?: () => void;
+  apiConnectionLabel?: string;
   referenceModelImage?: PreparedImageDraft | null;
   referenceModelUsage?: ReferenceModelUsage | null;
   saveState?: "idle" | "saving" | "saved" | "error";
@@ -124,7 +127,7 @@ const ALIGN_OPTIONS: Array<{ value: OverlayTextAlign; label: string; Icon: typeo
 const DEFAULT_COLOR_RECOMMENDATIONS: ImageColorRecommendations = {
   photoColors: ["#e8ddcb", "#102532", "#7a6b5a", "#d5b692"],
   recommendedTextColors: ["#ffffff", "#102532", "#f4efe6", "#4cb7aa"],
-  recommendedShapeColors: ["#102532", "#1d3748", "#f4efe6", "#85735e"],
+  recommendedShapeColors: ["#102532", "#1d3748", "#f4efe6", "#85735e", "#c8474d"],
   accentColor: "#4cb7aa",
   darkColor: "#102532",
   lightColor: "#f4efe6"
@@ -134,6 +137,8 @@ const BASIC_SOLID_COLORS = [
   "#f4efe6",
   "#d9d2c3",
   "#c4b8a0",
+  "#c8474d",
+  "#e05a63",
   "#102532",
   "#1d3748",
   "#4cb7aa",
@@ -148,9 +153,11 @@ export function PdpEditor({
   initialDraftState,
   lastSavedAt,
   manualSaveToastToken = 0,
+  onOpenSettings,
   onReset,
   onDraftStateChange,
   onManualSave,
+  apiConnectionLabel = "키 필요",
   referenceModelImage = null,
   referenceModelUsage = null,
   saveState = "idle"
@@ -166,7 +173,9 @@ export function PdpEditor({
   const [notice, setNotice] = useState(
     () => initialDraftState?.notice ?? "섹션 컷을 고르고 텍스트를 배치한 뒤 바로 다운로드할 수 있습니다."
   );
-  const [sectionOptions, setSectionOptions] = useState<Record<number, ImageGenOptions>>(() => initialDraftState?.sectionOptions ?? {});
+  const [sectionOptions, setSectionOptions] = useState<Record<number, ImageGenOptions>>(
+    () => normalizeSectionOptions(initialDraftState?.sectionOptions ?? {}, referenceModelUsage)
+  );
   const [overlaysBySection, setOverlaysBySection] = useState<Record<number, CanvasLayer[]>>(
     () => normalizeOverlayRecord(initialDraftState?.overlaysBySection ?? {})
   );
@@ -193,6 +202,7 @@ export function PdpEditor({
       }
   );
   const [showSaveToast, setShowSaveToast] = useState(false);
+  const [isDownloadingAll, setIsDownloadingAll] = useState(false);
   const imageContainerRef = useRef<HTMLDivElement>(null);
   const previewStageRef = useRef<HTMLDivElement>(null);
   const resizeSessionRef = useRef<Record<string, { width: number; height: number; fontSize: number }>>({});
@@ -291,16 +301,11 @@ export function PdpEditor({
   const photoColorRecommendations = useMemo(() => uniqueColors(colorRecommendations.photoColors), [colorRecommendations.photoColors]);
 
   const currentOptions = useMemo(() => {
-    return (
-      sectionOptions[currentSectionIndex] ?? {
-        style: "studio",
-        withModel: currentSectionIndex === 0,
-        modelGender: "female",
-        modelAgeRange: "20s",
-        modelCountry: "korea"
-      }
+    return normalizeImageOptions(
+      sectionOptions[currentSectionIndex],
+      referenceModelUsage === "all-sections" ? true : currentSectionIndex === 0
     );
-  }, [currentSectionIndex, sectionOptions]);
+  }, [currentSectionIndex, referenceModelUsage, sectionOptions]);
   const referenceModelAppliesToCurrentSection = Boolean(
     referenceModelImage &&
       referenceModelUsage &&
@@ -557,6 +562,9 @@ export function PdpEditor({
                 {STYLE_OPTIONS.find((option) => option.value === currentOptions.style)?.label ?? "스튜디오컷"}
               </span>
               <span className={styles.summaryChip}>{selectedModelSummary}</span>
+              <span className={styles.summaryChip}>
+                {currentOptions.guidePriorityMode === "guide-first" ? "디자인 가이드 우선" : "컷 타입 우선"}
+              </span>
             </div>
 
             <div className={styles.optionSurface}>
@@ -571,21 +579,46 @@ export function PdpEditor({
                 </button>
               </div>
               {inspectorSections.shotMood ? (
-                <div className={styles.styleOptionGrid}>
-                  {STYLE_OPTIONS.map((style) => (
-                    <button
-                      className={currentOptions.style === style.value ? styles.styleCardActive : styles.styleCard}
-                      key={style.value}
-                      onClick={() => setCurrentOptions({ style: style.value })}
-                      type="button"
-                    >
-                      <strong>{style.label}</strong>
-                      <small>{style.description}</small>
-                    </button>
-                  ))}
-                </div>
+                <>
+                  <div className={styles.styleOptionGrid}>
+                    {STYLE_OPTIONS.map((style) => (
+                      <button
+                        className={currentOptions.style === style.value ? styles.styleCardActive : styles.styleCard}
+                        key={style.value}
+                        onClick={() => setCurrentOptions({ style: style.value })}
+                        type="button"
+                      >
+                        <strong>{style.label}</strong>
+                        <small>{style.description}</small>
+                      </button>
+                    ))}
+                  </div>
+
+                  <label className={styles.toggleCard}>
+                    <div className={styles.toggleCardCopy}>
+                      <strong>디자인 가이드 우선</strong>
+                      <span>
+                        {currentOptions.guidePriorityMode === "guide-first"
+                          ? "Image Purpose, Layout Notes, Style Guide를 함께 반영합니다."
+                          : "Image Purpose만 유지하고, 선택한 컷 타입을 우선해 이미지를 설계합니다."}
+                      </span>
+                    </div>
+                    <input
+                      checked={currentOptions.guidePriorityMode === "guide-first"}
+                      onChange={(event) =>
+                        setCurrentOptions({
+                          guidePriorityMode: event.target.checked ? "guide-first" : "style-first"
+                        })
+                      }
+                      type="checkbox"
+                    />
+                  </label>
+                </>
               ) : (
-                <p className={styles.collapsedHint}>현재 선택: {STYLE_OPTIONS.find((style) => style.value === currentOptions.style)?.label ?? "스튜디오컷"}</p>
+                <p className={styles.collapsedHint}>
+                  현재 선택: {STYLE_OPTIONS.find((style) => style.value === currentOptions.style)?.label ?? "스튜디오컷"} ·{" "}
+                  {currentOptions.guidePriorityMode === "guide-first" ? "디자인 가이드 우선" : "컷 타입 우선"}
+                </p>
               )}
             </div>
 
@@ -956,8 +989,8 @@ export function PdpEditor({
               <label className={styles.floatingField}>
                 <span className={styles.optionMiniLabel}>투명도</span>
                 <div className={styles.rangeField}>
-                  <input className={styles.rangeInput} max={1} min={0.05} step={0.05} type="range" value={selectedShapeLayer.fillOpacity} onChange={(event) => updateOverlay(selectedShapeLayer.id, { fillOpacity: Number(event.target.value) || 0.5 })} />
-                  <input className={styles.input} max={1} min={0.05} step={0.05} type="number" value={selectedShapeLayer.fillOpacity} onChange={(event) => updateOverlay(selectedShapeLayer.id, { fillOpacity: Number(event.target.value) || 0.5 })} />
+                  <input className={styles.rangeInput} max={1} min={0} step={0.05} type="range" value={selectedShapeLayer.fillOpacity} onChange={(event) => updateOverlay(selectedShapeLayer.id, { fillOpacity: Number(event.target.value) || 0 })} />
+                  <input className={styles.input} max={1} min={0} step={0.05} type="number" value={selectedShapeLayer.fillOpacity} onChange={(event) => updateOverlay(selectedShapeLayer.id, { fillOpacity: Number(event.target.value) || 0 })} />
                 </div>
               </label>
               <label className={styles.floatingField}>
@@ -1086,20 +1119,20 @@ export function PdpEditor({
           <div className={styles.workbenchSectionStack}>
             <div className={styles.guidelineGrid}>
               <div>
+                <strong>Guide Mode</strong>
+                <p>{currentOptions.guidePriorityMode === "guide-first" ? "디자인 가이드 우선" : "컷 타입 우선"}</p>
+              </div>
+              <div>
                 <strong>Image Purpose</strong>
                 <p>{currentSection.purpose}</p>
               </div>
               <div>
-                <strong>On-Image Text</strong>
-                <p>{currentSection.on_image_text}</p>
-              </div>
-              <div>
                 <strong>Layout Notes</strong>
-                <p>{currentSection.layout_notes}</p>
+                <p>{currentOptions.guidePriorityMode === "guide-first" ? currentSection.layout_notes : "이번 생성에는 적용하지 않음"}</p>
               </div>
               <div>
                 <strong>Style Guide</strong>
-                <p>{currentSection.style_guide}</p>
+                <p>{currentOptions.guidePriorityMode === "guide-first" ? currentSection.style_guide : "이번 생성에는 적용하지 않음"}</p>
               </div>
             </div>
 
@@ -1208,7 +1241,7 @@ export function PdpEditor({
       width: estimatedBox.width,
       height: estimatedBox.height,
       fontSize: defaultFontSize,
-      color: textColorRecommendations[0] ?? "#ffffff",
+      color: "#ffffff",
       backgroundColor: shapeColorRecommendations[0] ?? "#102532",
       backgroundEnabled: false,
       backgroundOpacity: 0.72,
@@ -1250,8 +1283,8 @@ export function PdpEditor({
       width: 260,
       height: 120,
       fillColor: shapeColorRecommendations[0] ?? colorRecommendations.darkColor,
-      fillOpacity: 0.74,
-      borderRadius: 28
+      fillOpacity: 1,
+      borderRadius: 0
     });
 
     setOverlaysBySection((current) => ({
@@ -1362,36 +1395,97 @@ export function PdpEditor({
     });
   };
 
-  const handleDownload = async () => {
-    if (!imageContainerRef.current || !currentSection.generatedImage) {
-      return;
+  const captureSectionBlob = async (sectionIndex: number) => {
+    const section = sections[sectionIndex];
+    if (!section?.generatedImage) {
+      throw new Error("이미지가 없는 섹션은 다운로드할 수 없습니다.");
     }
 
-    try {
-      const previousSelected = selectedOverlayId;
-      setSelectedOverlayId(null);
-      setEditingOverlayId(null);
-      setActiveColorPalette(null);
-      await new Promise((resolve) => setTimeout(resolve, 80));
+    const width = imageContainerRef.current?.clientWidth ?? 460;
+    const layers = overlaysBySection[sectionIndex] ?? [];
+    const exportNode = await buildExportNode({
+      imageSrc: section.generatedImage,
+      width,
+      layers
+    });
 
-      const canvas = await html2canvas(imageContainerRef.current, {
+    document.body.appendChild(exportNode);
+
+    try {
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => resolve());
+        });
+      });
+
+      const canvas = await html2canvas(exportNode, {
         useCORS: true,
         allowTaint: true,
         backgroundColor: null,
         scale: 2
       });
 
-      if (previousSelected) {
-        setSelectedOverlayId(previousSelected);
+      const blob = await new Promise<Blob | null>((resolve) => {
+        canvas.toBlob(resolve, "image/jpeg", 0.92);
+      });
+
+      if (!blob) {
+        throw new Error("다운로드용 이미지를 만들지 못했습니다.");
       }
 
-      const link = document.createElement("a");
-      link.download = `pdp-${currentSection.section_id.toLowerCase()}.jpg`;
-      link.href = canvas.toDataURL("image/jpeg", 0.92);
-      link.click();
+      return blob;
+    } finally {
+      exportNode.remove();
+    }
+  };
+
+  const handleDownload = async () => {
+    if (!currentSection.generatedImage) {
+      return;
+    }
+
+    try {
+      setSelectedOverlayId(null);
+      setEditingOverlayId(null);
+      setActiveColorPalette(null);
+      const blob = await captureSectionBlob(currentSectionIndex);
+      downloadBlob(blob, `pdp-${sanitizeSectionFileName(currentSection.section_id)}.jpg`);
       setNotice(`${getDisplaySectionName(currentSection)} 컷을 다운로드했습니다.`);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "이미지를 다운로드하지 못했습니다.");
+    }
+  };
+
+  const handleDownloadAll = async () => {
+    const downloadableSections = sections
+      .map((section, index) => ({ section, index }))
+      .filter((entry) => Boolean(entry.section.generatedImage));
+
+    if (!downloadableSections.length) {
+      setErrorMessage("다운로드할 이미지가 아직 없습니다.");
+      return;
+    }
+
+    try {
+      setIsDownloadingAll(true);
+      setSelectedOverlayId(null);
+      setEditingOverlayId(null);
+      setActiveColorPalette(null);
+
+      const zip = new JSZip();
+
+      for (const { section, index } of downloadableSections) {
+        const blob = await captureSectionBlob(index);
+        zip.file(`pdp-${String(index + 1).padStart(2, "0")}-${sanitizeSectionFileName(section.section_id)}.jpg`, blob);
+      }
+
+      const archive = await zip.generateAsync({ type: "blob" });
+      downloadBlob(archive, `pdp-sections-${new Date().toISOString().slice(0, 10)}.zip`);
+      setNotice(`${downloadableSections.length}개 섹션 이미지를 ZIP으로 다운로드했습니다.`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "전체 이미지를 ZIP으로 다운로드하지 못했습니다.");
+    } finally {
+      setIsDownloadingAll(false);
     }
   };
 
@@ -1400,25 +1494,40 @@ export function PdpEditor({
       <section className={styles.editorShell} onClick={clearLayerSelection}>
         <header className={styles.editorHeader} onClick={stopShellClick}>
           <div>
-            <h1 className={styles.editorHeading}>한이룸의 상세페이지 마법사 2.0</h1>
+            <h1 className={styles.editorHeading}>
+              <button className={styles.brandHomeButton} onClick={onReset} type="button">
+                한이룸의 상세페이지 마법사 2.0
+              </button>
+            </h1>
             <p className={styles.editorSubcopy}>섹션 컷을 고르고 텍스트를 배치한 뒤 바로 완성본을 저장하세요.</p>
           </div>
 
           <div className={styles.editorHeaderMeta}>
             <span className={styles.metaPill}>비율 {aspectRatio}</span>
             <span className={styles.metaPill}>톤 {toneLabel}</span>
+            <span className={styles.metaPill}>API {apiConnectionLabel}</span>
             <span className={styles.metaPill}>생성됨 {generatedCount}/{sections.length}</span>
             {lastSavedAt ? <span className={styles.metaPill}>최근 저장 {formatSavedAt(lastSavedAt)}</span> : null}
             {saveState === "saving" ? <span className={styles.metaPill}>저장 중</span> : null}
           </div>
 
           <div className={styles.topbarActions}>
+            {onOpenSettings ? (
+              <button className={`${styles.secondaryButton} ${styles.headerActionButton}`} onClick={onOpenSettings} type="button">
+                <Settings2 size={16} />
+                설정
+              </button>
+            ) : null}
             {onManualSave ? (
               <button className={`${styles.secondaryButton} ${styles.headerActionButton} ${styles.headerSaveButton}`} disabled={saveState === "saving"} onClick={onManualSave} type="button">
                 {saveState === "saving" ? <Loader2 className={styles.spinIcon} size={16} /> : <Save size={16} />}
                 작업 저장하기
               </button>
             ) : null}
+            <button className={styles.secondaryButton} disabled={!generatedCount || isDownloadingAll} onClick={handleDownloadAll} type="button">
+              {isDownloadingAll ? <Loader2 className={styles.spinIcon} size={16} /> : <Download size={16} />}
+              전체 이미지 ZIP
+            </button>
             <button className={styles.primaryButton} onClick={handleDownload} type="button" disabled={!currentSection.generatedImage}>
               <Download size={16} />
               현재 섹션 다운로드
@@ -1873,6 +1982,116 @@ function buildShapeLayerStyle(layer: ShapeLayer): CSSProperties {
   };
 }
 
+async function buildExportNode(input: {
+  imageSrc: string;
+  width: number;
+  layers: CanvasLayer[];
+}) {
+  const image = await loadImage(input.imageSrc);
+  const width = Math.max(1, Math.round(input.width));
+  const height = Math.max(1, Math.round((image.naturalHeight / Math.max(image.naturalWidth, 1)) * width));
+
+  const container = document.createElement("div");
+  container.style.position = "fixed";
+  container.style.left = "-100000px";
+  container.style.top = "0";
+  container.style.width = `${width}px`;
+  container.style.height = `${height}px`;
+  container.style.background = "transparent";
+  container.style.overflow = "hidden";
+  container.style.pointerEvents = "none";
+  container.style.zIndex = "-1";
+
+  const imageEl = document.createElement("img");
+  imageEl.src = input.imageSrc;
+  imageEl.alt = "";
+  imageEl.draggable = false;
+  imageEl.style.display = "block";
+  imageEl.style.width = "100%";
+  imageEl.style.height = "100%";
+  imageEl.style.objectFit = "cover";
+  container.appendChild(imageEl);
+
+  const shapeLayers = input.layers.filter(isShapeLayer);
+  const textLayers = input.layers.filter(isTextLayer);
+
+  for (const layer of [...shapeLayers, ...textLayers]) {
+    const layerEl = document.createElement("div");
+    layerEl.style.position = "absolute";
+    layerEl.style.left = `${layer.x}px`;
+    layerEl.style.top = `${layer.y}px`;
+    layerEl.style.width = `${toNumericSize(layer.width, width)}px`;
+    layerEl.style.height = `${toNumericSize(layer.height, height)}px`;
+
+    if (isShapeLayer(layer)) {
+      const shapeSurface = document.createElement("div");
+      shapeSurface.style.width = "100%";
+      shapeSurface.style.height = "100%";
+      shapeSurface.style.backgroundColor = toRgba(layer.fillColor, layer.fillOpacity);
+      shapeSurface.style.borderRadius = `${layer.borderRadius}px`;
+      shapeSurface.style.border = "1px solid rgba(255, 255, 255, 0.18)";
+      shapeSurface.style.boxShadow = "inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 12px 28px rgba(8, 16, 28, 0.18)";
+      layerEl.appendChild(shapeSurface);
+    } else {
+      const shell = document.createElement("div");
+      const shellStyle = buildOverlayShellStyle(layer);
+      applyInlineStyle(shell, shellStyle);
+      shell.style.overflow = "visible";
+
+      if (layer.backgroundEnabled) {
+        const backdrop = document.createElement("div");
+        backdrop.style.position = "absolute";
+        backdrop.style.inset = "0";
+        const backdropStyle = buildOverlayBackgroundStyle(layer);
+        applyInlineStyle(backdrop, backdropStyle);
+        shell.appendChild(backdrop);
+      }
+
+      const textEl = document.createElement("div");
+      textEl.textContent = layer.text;
+      const textStyle = buildOverlayTextStyle(layer);
+      applyInlineStyle(textEl, textStyle);
+      textEl.style.position = "relative";
+      textEl.style.zIndex = "1";
+      shell.appendChild(textEl);
+      layerEl.appendChild(shell);
+    }
+
+    container.appendChild(layerEl);
+  }
+
+  return container;
+}
+
+function applyInlineStyle(target: HTMLElement, style: CSSProperties) {
+  Object.entries(style).forEach(([key, value]) => {
+    if (value === undefined || value === null) {
+      return;
+    }
+
+    const cssKey = key.replace(/[A-Z]/g, (segment) => `-${segment.toLowerCase()}`);
+    target.style.setProperty(cssKey, String(value));
+  });
+}
+
+function downloadBlob(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function sanitizeSectionFileName(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "") || "section";
+}
+
 function buildOverlayTextStyle(overlay: TextOverlay): CSSProperties {
   return {
     display: "block",
@@ -1893,8 +2112,15 @@ function buildOverlayTextStyle(overlay: TextOverlay): CSSProperties {
 }
 
 function normalizeOverlayRecord(record: Record<number, CanvasLayer[]>) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return {};
+  }
+
   return Object.fromEntries(
-    Object.entries(record).map(([key, overlays]) => [Number(key), overlays.map((overlay) => normalizeCanvasLayer(overlay))])
+    Object.entries(record).map(([key, overlays]) => [
+      Number(key),
+      (Array.isArray(overlays) ? overlays : []).map((overlay) => normalizeCanvasLayer(overlay))
+    ])
   ) as Record<number, CanvasLayer[]>;
 }
 
@@ -1920,6 +2146,7 @@ function normalizeTextOverlay(overlay: Partial<TextOverlay> & Pick<TextOverlay, 
     language,
     text: translations[language] || translations.ko,
     translations,
+    color: overlay.color ?? "#ffffff",
     backgroundColor: overlay.backgroundColor === "transparent" ? "#102532" : overlay.backgroundColor,
     backgroundEnabled: overlay.backgroundEnabled ?? hasLegacyBackground,
     backgroundOpacity: overlay.backgroundOpacity ?? 0.72,
@@ -1958,8 +2185,8 @@ function normalizeShapeLayer(layer: Partial<ShapeLayer> & Pick<ShapeLayer, "id" 
     ...layer,
     kind: "shape",
     fillColor: layer.fillColor ?? "#102532",
-    fillOpacity: layer.fillOpacity ?? 0.72,
-    borderRadius: layer.borderRadius ?? 28
+    fillOpacity: layer.fillOpacity ?? 1,
+    borderRadius: layer.borderRadius ?? 0
   };
 }
 
@@ -2118,10 +2345,15 @@ async function extractImageColorRecommendations(imageSrc: string): Promise<Image
     const accentHex = rgbToHex(boostColorPresence(accent));
     const darkHex = rgbToHex(darkenRgb(dark, 0.08));
     const lightHex = rgbToHex(lightenRgb(light, 0.04));
+    const complementHex = rgbToHex(rotateHue(accent, 180));
+    const mutedAccentHex = rgbToHex(mixRgb(accent, dark, 0.36));
+    const warmTintHex = rgbToHex(lightenRgb(mixRgb(accent, light, 0.5), 0.12));
+    const deepContrastHex = rgbToHex(darkenRgb(mixRgb(dominant, accent, 0.22), 0.22));
 
     return {
       photoColors: uniqueColors(swatches.slice(0, 6).map((swatch) => rgbToHex(swatch.color))),
       recommendedTextColors: uniqueColors([
+        "#ffffff",
         getRelativeLuminance(dominant) < 0.48 ? "#f9f7f1" : "#102532",
         lightHex,
         darkHex,
@@ -2129,9 +2361,11 @@ async function extractImageColorRecommendations(imageSrc: string): Promise<Image
       ]),
       recommendedShapeColors: uniqueColors([
         darkHex,
-        rgbToHex(mixRgb(dark, accent, 0.28)),
+        mutedAccentHex,
         rgbToHex(mixRgb(light, dark, 0.2)),
-        rgbToHex(mixRgb(accent, light, 0.42))
+        warmTintHex,
+        deepContrastHex,
+        complementHex
       ]),
       accentColor: accentHex,
       darkColor: darkHex,
@@ -2215,6 +2449,79 @@ function boostColorPresence(color: { r: number; g: number; b: number }) {
     next.b = clampValue(next.b + 28, 0, 255);
   }
   return next;
+}
+
+function rotateHue(color: { r: number; g: number; b: number }, degrees: number) {
+  const { h, s, l } = rgbToHsl(color);
+  return hslToRgb({
+    h: (h + degrees + 360) % 360,
+    s,
+    l
+  });
+}
+
+function rgbToHsl(color: { r: number; g: number; b: number }) {
+  const r = color.r / 255;
+  const g = color.g / 255;
+  const b = color.b / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const delta = max - min;
+  const l = (max + min) / 2;
+  const s = delta === 0 ? 0 : delta / (1 - Math.abs(2 * l - 1));
+
+  let h = 0;
+  if (delta !== 0) {
+    if (max === r) {
+      h = 60 * (((g - b) / delta) % 6);
+    } else if (max === g) {
+      h = 60 * ((b - r) / delta + 2);
+    } else {
+      h = 60 * ((r - g) / delta + 4);
+    }
+  }
+
+  return {
+    h: h < 0 ? h + 360 : h,
+    s,
+    l
+  };
+}
+
+function hslToRgb(color: { h: number; s: number; l: number }) {
+  const c = (1 - Math.abs(2 * color.l - 1)) * color.s;
+  const x = c * (1 - Math.abs(((color.h / 60) % 2) - 1));
+  const m = color.l - c / 2;
+
+  let rPrime = 0;
+  let gPrime = 0;
+  let bPrime = 0;
+
+  if (color.h < 60) {
+    rPrime = c;
+    gPrime = x;
+  } else if (color.h < 120) {
+    rPrime = x;
+    gPrime = c;
+  } else if (color.h < 180) {
+    gPrime = c;
+    bPrime = x;
+  } else if (color.h < 240) {
+    gPrime = x;
+    bPrime = c;
+  } else if (color.h < 300) {
+    rPrime = x;
+    bPrime = c;
+  } else {
+    rPrime = c;
+    bPrime = x;
+  }
+
+  return {
+    r: Math.round((rPrime + m) * 255),
+    g: Math.round((gPrime + m) * 255),
+    b: Math.round((bPrime + m) * 255)
+  };
 }
 
 function hexToRgb(value: string) {
@@ -2333,9 +2640,48 @@ function clampWorkbenchToStage(workbench: FloatingWorkbenchState, stageEl: HTMLD
   };
 }
 
-function normalizeSectionCopyFields(section: GeneratedResult["blueprint"]["sections"][number]) {
+function normalizeImageOptions(
+  options: ImageGenOptions | undefined,
+  fallbackWithModel: boolean
+): ImageGenOptions & { guidePriorityMode: NonNullable<ImageGenOptions["guidePriorityMode"]> } {
   return {
-    ...section,
+    style: options?.style ?? "studio",
+    withModel: options?.withModel ?? fallbackWithModel,
+    modelGender: options?.modelGender ?? "female",
+    modelAgeRange: options?.modelAgeRange ?? "20s",
+    modelCountry: options?.modelCountry ?? "korea",
+    guidePriorityMode: options?.guidePriorityMode ?? "guide-first",
+    headline: options?.headline,
+    subheadline: options?.subheadline,
+    isRegeneration: options?.isRegeneration,
+    referenceModelImageBase64: options?.referenceModelImageBase64,
+    referenceModelImageMimeType: options?.referenceModelImageMimeType,
+    referenceModelImageFileName: options?.referenceModelImageFileName
+  };
+}
+
+function normalizeSectionOptions(
+  record: Record<number, ImageGenOptions>,
+  referenceModelUsage: ReferenceModelUsage | null
+) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return {} as Record<number, ImageGenOptions>;
+  }
+
+  return Object.fromEntries(
+    Object.entries(record).map(([key, options]) => [
+      Number(key),
+      normalizeImageOptions(options, referenceModelUsage === "all-sections" ? true : Number(key) === 0)
+    ])
+  ) as Record<number, ImageGenOptions>;
+}
+
+function normalizeSectionCopyFields(section: GeneratedResult["blueprint"]["sections"][number]) {
+  const { on_image_text: _legacyOnImageText, ...rest } =
+    section as GeneratedResult["blueprint"]["sections"][number] & { on_image_text?: string };
+
+  return {
+    ...rest,
     headline_en: section.headline_en || section.headline,
     subheadline_en: section.subheadline_en || section.subheadline,
     bullets_en: Array.isArray(section.bullets_en) && section.bullets_en.length ? section.bullets_en : section.bullets,

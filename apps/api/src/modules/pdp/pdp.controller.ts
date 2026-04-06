@@ -4,9 +4,9 @@ import { PdpService, PdpServiceError, toPdpErrorResponse } from "./pdp.service";
 export class PdpController {
   constructor(private readonly pdpService = new PdpService()) {}
 
-  async analyze(body: PdpAnalyzeRequest) {
+  async analyze(body: PdpAnalyzeRequest, geminiApiKeyOverride?: string) {
     try {
-      const result = await this.pdpService.analyzeProduct(body);
+      const result = await this.pdpService.analyzeProduct(body, geminiApiKeyOverride);
       return {
         ok: true as const,
         result
@@ -16,9 +16,9 @@ export class PdpController {
     }
   }
 
-  async generateImage(body: PdpGenerateImageRequest) {
+  async generateImage(body: PdpGenerateImageRequest, geminiApiKeyOverride?: string) {
     try {
-      const result = await this.pdpService.generateSectionImage(body);
+      const result = await this.pdpService.generateSectionImage(body, geminiApiKeyOverride);
       return {
         ok: true as const,
         ...result

@@ -2,8 +2,8 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata = {
-  title: "테니스 대회 정보",
-  description: "한국 아마추어 테니스 대회 일정, 참가비, 참가 조건을 한 화면에서 보는 서비스"
+  title: "한이룸 상세페이지 마법사 20",
+  description: "제품 이미지 편집과 상세페이지 구조 설계를 위한 전용 프로젝트"
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

@@ -5,6 +5,7 @@ export type PdpModelAgeRange = "teen" | "20s" | "30s" | "40s" | "50s_plus";
 export type PdpModelCountry = "korea" | "japan" | "usa" | "france" | "germany" | "africa";
 export type PdpCopyLanguage = "ko" | "en";
 export type ReferenceModelUsage = "hero-only" | "all-sections";
+export type PdpGuidePriorityMode = "guide-first" | "style-first";
 
 export interface ScorecardItem {
   category: string;
@@ -32,7 +33,6 @@ export interface SectionBlueprint {
   purpose: string;
   prompt_ko: string;
   prompt_en: string;
-  on_image_text: string;
   negative_prompt: string;
   style_guide: string;
   reference_usage: string;
@@ -57,6 +57,7 @@ export interface ImageGenOptions {
   modelGender?: PdpModelGender;
   modelAgeRange?: PdpModelAgeRange;
   modelCountry?: PdpModelCountry;
+  guidePriorityMode?: PdpGuidePriorityMode;
   headline?: string;
   subheadline?: string;
   isRegeneration?: boolean;

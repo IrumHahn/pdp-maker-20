@@ -3,16 +3,53 @@ import type {
   AspectRatio,
   ImageGenOptions,
   LandingPageBlueprint,
+  PdpGuidePriorityMode,
   PdpAnalyzeRequest,
   PdpErrorCode,
   SectionBlueprint
 } from "@runacademy/shared";
 
 const ANALYZE_MODEL = "gemini-3.1-pro-preview";
-const IMAGE_MODEL = "gemini-2.5-flash-image";
+const IMAGE_MODEL = "gemini-3-pro-image-preview";
 const DEFAULT_IMAGE_MIME = "image/jpeg";
+const REFERENCE_MODEL_MAX_ATTEMPTS = 3;
 
 type GeneratedImagePayload = {
+  base64: string;
+  mimeType: string;
+};
+
+type ReferenceModelProfile = {
+  genderPresentation: string;
+  ageImpression: string;
+  faceShape: string;
+  hairstyle: string;
+  skinTone: string;
+  eyeDetails: string;
+  browDetails: string;
+  lipDetails: string;
+  overallVibe: string;
+  distinctiveFeatures: string[];
+  keepTraits: string[];
+  flexibleTraits: string[];
+};
+
+type GeneratedImageValidation = {
+  isSamePerson: boolean;
+  genderPresentationPreserved: boolean;
+  styleMatch: boolean;
+  confidence: "high" | "medium" | "low";
+  reason: string;
+  correctionFocus: string[];
+};
+
+type InternalImageGenOptions = ImageGenOptions & {
+  guidePriorityMode: PdpGuidePriorityMode;
+  referenceModelProfile?: ReferenceModelProfile | null;
+  retryDirective?: string;
+};
+
+type NormalizedReferenceModelImage = {
   base64: string;
   mimeType: string;
 };
@@ -29,28 +66,28 @@ export class PdpServiceError extends Error {
 }
 
 export class PdpService {
-  async analyzeProduct(request: PdpAnalyzeRequest) {
+  async analyzeProduct(request: PdpAnalyzeRequest, geminiApiKeyOverride?: string) {
     const normalizedImage = sanitizeBase64Payload(request.imageBase64);
     const mimeType = normalizeMimeType(request.mimeType);
     const referenceModelImage = normalizeReferenceModelImage(request.modelImageBase64, request.modelImageMimeType);
-    const client = this.getClient();
+    const client = this.getClient(geminiApiKeyOverride);
+    const referenceModelProfile =
+      referenceModelImage ? await this.extractReferenceModelProfile(client, referenceModelImage) : null;
 
     const blueprint = await retryOperation(async () => {
       const response = await client.models.generateContent({
         model: ANALYZE_MODEL,
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType,
-                data: normalizedImage
+        contents: [
+          {
+            parts: [
+              buildHighResolutionInlinePart(mimeType, normalizedImage),
+              ...(referenceModelImage ? [buildHighResolutionInlinePart(referenceModelImage.mimeType, referenceModelImage.base64)] : []),
+              {
+                text: buildAnalyzePrompt(request.additionalInfo, request.desiredTone, referenceModelProfile)
               }
-            },
-            {
-              text: buildAnalyzePrompt(request.additionalInfo, request.desiredTone, Boolean(referenceModelImage))
-            }
-          ]
-        },
+            ]
+          }
+        ] as any,
         config: {
           thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           responseMimeType: "application/json",
@@ -103,7 +140,6 @@ export class PdpService {
                     purpose: { type: Type.STRING },
                     prompt_ko: { type: Type.STRING },
                     prompt_en: { type: Type.STRING },
-                    on_image_text: { type: Type.STRING },
                     negative_prompt: { type: Type.STRING },
                     style_guide: { type: Type.STRING },
                     reference_usage: { type: Type.STRING }
@@ -139,10 +175,12 @@ export class PdpService {
         modelGender: "female",
         modelAgeRange: "20s",
         modelCountry: "korea",
+        guidePriorityMode: "guide-first",
         headline: firstSection.headline,
         subheadline: firstSection.subheadline,
         referenceModelImageBase64: referenceModelImage?.base64,
-        referenceModelImageMimeType: referenceModelImage?.mimeType
+        referenceModelImageMimeType: referenceModelImage?.mimeType,
+        referenceModelProfile
       }
     });
 
@@ -163,8 +201,30 @@ export class PdpService {
     aspectRatio: AspectRatio;
     desiredTone?: string;
     options?: ImageGenOptions;
-  }) {
-    const image = await this.generateSectionImageInternal(request);
+  }, geminiApiKeyOverride?: string) {
+    const client = this.getClient(geminiApiKeyOverride);
+    const normalizedReferenceModel = normalizeReferenceModelImage(
+      request.options?.referenceModelImageBase64,
+      request.options?.referenceModelImageMimeType
+    );
+    const referenceModelProfile =
+      normalizedReferenceModel && request.options?.withModel
+        ? await this.extractReferenceModelProfile(client, normalizedReferenceModel)
+        : null;
+
+    const image = await this.generateSectionImageInternal({
+      ...request,
+      client,
+      options: request.options
+        ? {
+            ...request.options,
+            guidePriorityMode: request.options.guidePriorityMode ?? "guide-first",
+            referenceModelImageBase64: normalizedReferenceModel?.base64,
+            referenceModelImageMimeType: normalizedReferenceModel?.mimeType,
+            referenceModelProfile
+          }
+        : undefined
+    });
 
     return {
       imageBase64: image.base64,
@@ -177,11 +237,21 @@ export class PdpService {
     section: SectionBlueprint;
     aspectRatio: AspectRatio;
     desiredTone?: string;
-    options?: ImageGenOptions;
+    options?: InternalImageGenOptions;
+    client?: GoogleGenAI;
   }): Promise<GeneratedImagePayload> {
-    const client = this.getClient();
+    const client = request.client ?? this.getClient();
     const originalImageBase64 = sanitizeBase64Payload(request.originalImageBase64);
     const section = normalizeSection(request.section, 0);
+    const normalizedReferenceModel = normalizeReferenceModelImage(
+      request.options?.referenceModelImageBase64,
+      request.options?.referenceModelImageMimeType
+    );
+    const options = normalizeImageOptions(request.options);
+    const referenceModelProfile =
+      normalizedReferenceModel && options.withModel
+        ? request.options?.referenceModelProfile ?? (await this.extractReferenceModelProfile(client, normalizedReferenceModel))
+        : null;
 
     if (!section.prompt_en) {
       throw new PdpServiceError(
@@ -191,73 +261,204 @@ export class PdpService {
       );
     }
 
-    const prompt = buildImagePrompt(section.prompt_en, request.desiredTone, request.options);
+    const maxAttempts = normalizedReferenceModel && options.withModel ? REFERENCE_MODEL_MAX_ATTEMPTS : 1;
+    let lastGeneratedImage: GeneratedImagePayload | null = null;
+    let retryDirective = options.retryDirective;
 
-    return retryOperation(async () => {
-      const parts: Array<{ inlineData?: { mimeType: string; data: string }; text?: string }> = [
-        {
-          inlineData: {
-            mimeType: DEFAULT_IMAGE_MIME,
-            data: originalImageBase64
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const prompt = buildImagePrompt(section, request.desiredTone, {
+        ...options,
+        isRegeneration: options.isRegeneration || attempt > 0,
+        referenceModelImageBase64: normalizedReferenceModel?.base64,
+        referenceModelImageMimeType: normalizedReferenceModel?.mimeType,
+        referenceModelProfile,
+        retryDirective
+      });
+
+      const generatedImage = await retryOperation(async () => {
+        const parts: Array<{ inlineData?: { mimeType: string; data: string }; text?: string }> = [
+          {
+            inlineData: {
+              mimeType: DEFAULT_IMAGE_MIME,
+              data: originalImageBase64
+            }
           }
+        ];
+
+        if (normalizedReferenceModel && options.withModel) {
+          parts.push({
+            inlineData: {
+              mimeType: normalizedReferenceModel.mimeType,
+              data: normalizedReferenceModel.base64
+            }
+          });
         }
-      ];
 
-      const normalizedReferenceModel = normalizeReferenceModelImage(
-        request.options?.referenceModelImageBase64,
-        request.options?.referenceModelImageMimeType
-      );
-
-      if (normalizedReferenceModel && request.options?.withModel) {
         parts.push({
-          inlineData: {
-            mimeType: normalizedReferenceModel.mimeType,
-            data: normalizedReferenceModel.base64
+          text: prompt
+        });
+
+        const response = await client.models.generateContent({
+          model: IMAGE_MODEL,
+          contents: {
+            parts
+          },
+          config: {
+            imageConfig: {
+              aspectRatio: request.aspectRatio
+            }
           }
         });
-      }
 
-      parts.push({
-        text: prompt
-      });
+        const nextImage = extractGeneratedImage(response);
 
-      const response = await client.models.generateContent({
-        model: IMAGE_MODEL,
-        contents: {
-          parts
-        },
-        config: {
-          imageConfig: {
-            aspectRatio: request.aspectRatio
-          }
+        if (!nextImage) {
+          throw new PdpServiceError(
+            "PDP_IMAGE_GENERATION_FAILED",
+            "이미지를 생성하지 못했습니다.",
+            "Gemini image response did not include inline image data."
+          );
         }
+
+        return nextImage;
       });
 
-      const generatedImage = extractGeneratedImage(response);
+      lastGeneratedImage = generatedImage;
 
-      if (!generatedImage) {
-        throw new PdpServiceError(
-          "PDP_IMAGE_GENERATION_FAILED",
-          "이미지를 생성하지 못했습니다.",
-          "Gemini image response did not include inline image data."
-        );
+      if (!normalizedReferenceModel || !options.withModel || !referenceModelProfile) {
+        return generatedImage;
       }
 
-      return generatedImage;
-    });
+      const validation = await this.validateGeneratedImage(client, {
+        generatedImage,
+        referenceModelImage: normalizedReferenceModel,
+        referenceModelProfile,
+        expectedStyle: options.style
+      });
+
+      if (validation.isSamePerson && validation.genderPresentationPreserved && validation.styleMatch) {
+        return generatedImage;
+      }
+
+      retryDirective = buildRetryDirective(validation, referenceModelProfile, options.style);
+    }
+
+    if (!lastGeneratedImage) {
+      throw new PdpServiceError(
+        "PDP_IMAGE_GENERATION_FAILED",
+        "이미지를 생성하지 못했습니다.",
+        "No image was generated during the retry loop."
+      );
+    }
+
+    return lastGeneratedImage;
   }
 
-  private getClient() {
-    const apiKey = process.env.GEMINI_API_KEY?.trim();
+  private getClient(geminiApiKeyOverride?: string) {
+    const apiKey = geminiApiKeyOverride?.trim();
 
     if (!apiKey) {
       throw new PdpServiceError(
         "GEMINI_API_KEY_MISSING",
-        "서버에 GEMINI_API_KEY가 설정되어 있지 않습니다."
+        "설정 메뉴에서 본인 Gemini API 키를 입력해 주세요."
       );
     }
 
-    return new GoogleGenAI({ apiKey });
+    return new GoogleGenAI({ apiKey, apiVersion: "v1alpha" });
+  }
+
+  private async extractReferenceModelProfile(client: GoogleGenAI, referenceModelImage: NormalizedReferenceModelImage) {
+    const response = await client.models.generateContent({
+      model: ANALYZE_MODEL,
+      contents: [
+        {
+          parts: [
+            {
+              text:
+                "Analyze the uploaded reference person image and describe the same identifiable person for future commercial image generation. Focus on stable visual identity traits, not styling suggestions. Return JSON only."
+            },
+            buildHighResolutionInlinePart(referenceModelImage.mimeType, referenceModelImage.base64)
+          ]
+        }
+      ] as any,
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            genderPresentation: { type: Type.STRING },
+            ageImpression: { type: Type.STRING },
+            faceShape: { type: Type.STRING },
+            hairstyle: { type: Type.STRING },
+            skinTone: { type: Type.STRING },
+            eyeDetails: { type: Type.STRING },
+            browDetails: { type: Type.STRING },
+            lipDetails: { type: Type.STRING },
+            overallVibe: { type: Type.STRING },
+            distinctiveFeatures: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING }
+            },
+            keepTraits: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING }
+            },
+            flexibleTraits: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING }
+            }
+          }
+        }
+      }
+    });
+
+    return parseReferenceModelProfileResponse(response);
+  }
+
+  private async validateGeneratedImage(
+    client: GoogleGenAI,
+    input: {
+      generatedImage: GeneratedImagePayload;
+      referenceModelImage: NormalizedReferenceModelImage;
+      referenceModelProfile: ReferenceModelProfile;
+      expectedStyle: NonNullable<ImageGenOptions["style"]>;
+    }
+  ) {
+    const response = await client.models.generateContent({
+      model: ANALYZE_MODEL,
+      contents: [
+        {
+          parts: [
+            {
+              text: buildValidationPrompt(input.referenceModelProfile, input.expectedStyle)
+            },
+            buildHighResolutionInlinePart(input.referenceModelImage.mimeType, input.referenceModelImage.base64),
+            buildHighResolutionInlinePart(input.generatedImage.mimeType, input.generatedImage.base64)
+          ]
+        }
+      ] as any,
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            isSamePerson: { type: Type.BOOLEAN },
+            genderPresentationPreserved: { type: Type.BOOLEAN },
+            styleMatch: { type: Type.BOOLEAN },
+            confidence: { type: Type.STRING },
+            reason: { type: Type.STRING },
+            correctionFocus: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING }
+            }
+          }
+        }
+      }
+    });
+
+    return parseGeneratedImageValidationResponse(response);
   }
 }
 
@@ -343,12 +544,23 @@ function sanitizeBase64Payload(input: string) {
   return normalized;
 }
 
-function buildAnalyzePrompt(additionalInfo?: string, desiredTone?: string, hasReferenceModel = false) {
+function buildAnalyzePrompt(
+  additionalInfo?: string,
+  desiredTone?: string,
+  referenceModelProfile?: ReferenceModelProfile | null
+) {
+  const referenceModelPrompt = referenceModelProfile
+    ? `[참고 모델 이미지가 함께 제공됨]: 모델이 포함되는 컷은 업로드된 동일 인물의 정체성을 유지해야 합니다.
+- 유지할 핵심 특성: ${referenceModelProfile.keepTraits.join(", ")}
+- 식별 포인트: ${referenceModelProfile.distinctiveFeatures.join(", ")}
+- 전체 인상: ${referenceModelProfile.overallVibe}`
+    : "";
+
   return `
 이 제품 이미지를 분석하여 4~6개의 핵심 섹션으로 구성된 상세페이지 전체 블루프린트를 설계해주세요.
 ${additionalInfo ? `[사용자 추가 정보]: ${additionalInfo}` : ""}
 ${desiredTone ? `[원하는 디자인 톤]: ${desiredTone}` : ""}
-${hasReferenceModel ? "[참고 모델 이미지가 함께 제공됨]: 모델이 포함되는 컷은 업로드된 reference model과 동일 인물/동일 성별/동일 인상으로 유지되도록 설계할 것." : ""}
+${referenceModelPrompt}
 
 # 섹션 템플릿(필수 필드)
 - section_id: S1~S6
@@ -381,12 +593,11 @@ ${hasReferenceModel ? "[참고 모델 이미지가 함께 제공됨]: 모델이 
 - image_id: IMG_S1~IMG_S6
 - purpose: 이 이미지가 전달해야 하는 메시지(짧은 한 문장)
 - prompt_ko: 한국어 이미지 생성 프롬프트(1~2문장). 구도, 거리감, 시선 높이, 제품이 프레임에서 차지하는 비중을 함께 명시할 것.
-- prompt_en: 영어 프롬프트(실제 이미지 생성용). Include composition, framing distance, camera angle, and how the product should occupy the frame.
-- on_image_text: 이미지에 들어갈 문구와 텍스트 레이아웃 지시
+- prompt_en: 영어 프롬프트(실제 이미지 생성용). Include composition, framing distance, camera angle, product prominence, and the key subject action. Keep it neutral enough that studio/lifestyle/outdoor priority can still be controlled at generation time.
 - negative_prompt: 피해야 할 요소
-- style_guide: 전체 통일 스타일. 스튜디오는 정제된 세트/조명/질감, 라이프스타일은 현실감 있는 공간/행동, 아웃도어는 위치감/공기감/활동성을 분명히 적을 것.
+- style_guide: 전체 통일 스타일. 스튜디오는 정제된 세트/조명/질감, 라이프스타일은 현실감 있는 공간/행동, 아웃도어는 위치감/공기감/활동성을 분명히 적을 것. 이 값은 디자인 가이드 우선 모드에서만 강하게 적용될 수 있도록 작성할 것.
 - reference_usage: 업로드된 기존 제품 이미지를 어떻게 참고할지. 제품 형태, 라벨, 재질, 색감을 유지하는 기준을 명시할 것.
-- section_name, goal, layout_notes, compliance_notes, purpose, on_image_text, style_guide, reference_usage는 반드시 한국어로 작성할 것
+- section_name, goal, layout_notes, compliance_notes, purpose, style_guide, reference_usage는 반드시 한국어로 작성할 것
 - 영어는 *_en 필드와 prompt_en에만 사용할 것
 
 # 이미지 생성 공통 규칙
@@ -402,10 +613,11 @@ ${hasReferenceModel ? "[참고 모델 이미지가 함께 제공됨]: 모델이 
 }
 
 function buildImagePrompt(
-  prompt: string,
+  section: SectionBlueprint,
   desiredTone?: string,
-  options?: ImageGenOptions
+  options?: InternalImageGenOptions
 ) {
+  const baseSceneDirection = getBaseSceneDirection(section, options?.guidePriorityMode ?? "guide-first");
   let enhancedPrompt = "Create a high-end, conversion-optimized commercial advertising photograph. ";
 
   if (options?.headline) {
@@ -421,6 +633,9 @@ function buildImagePrompt(
       "Reference Inputs: image 1 is the original product reference and must preserve the exact product. image 2 is the mandatory model identity reference. ";
     enhancedPrompt +=
       "The final image MUST use the same person from image 2. Do not switch to a different model, do not change gender, and do not drift to a generic portrait face. ";
+    if (options.referenceModelProfile) {
+      enhancedPrompt += buildReferenceModelProfilePrompt(options.referenceModelProfile);
+    }
   }
 
   if (options?.isRegeneration) {
@@ -431,14 +646,29 @@ function buildImagePrompt(
     enhancedPrompt += "\nBase Instructions: ";
   }
 
-  enhancedPrompt += `Keep the product exactly as is. Change the background to: ${prompt}. `;
+  if (options?.withModel && options.referenceModelImageBase64) {
+    enhancedPrompt +=
+      `Using image 1 as the exact product reference and image 2 as the exact person reference, create a new commercial scene based on this direction: ${baseSceneDirection}. `;
+    enhancedPrompt +=
+      "The person in the final image must be the same person from image 2, with the same face, gender presentation, hairstyle, skin tone, and overall identity. ";
+    enhancedPrompt +=
+      "Do not replace the person with a different model, do not masculinize or feminize them differently, and do not drift to a generic fashion face. Treat this as the same person in a new pose, new framing, and new environment. ";
+  } else {
+    enhancedPrompt += `Keep the product exactly as is. Build the scene from this direction: ${baseSceneDirection}. `;
+  }
 
   if (desiredTone) {
     enhancedPrompt += `The overall style and tone should be ${desiredTone}. `;
   }
 
+  enhancedPrompt += buildGuidePriorityInstructions(section, options);
+
   if (!options?.isRegeneration) {
-    enhancedPrompt += buildImagePreferenceInstructions(options);
+    enhancedPrompt += buildImagePreferenceInstructions(section, options);
+  }
+
+  if (options?.retryDirective) {
+    enhancedPrompt += ` Retry correction: ${options.retryDirective} `;
   }
 
   enhancedPrompt += "\nComposition Rules: ";
@@ -455,7 +685,7 @@ function buildImagePrompt(
   return enhancedPrompt;
 }
 
-function buildImageStyleInstructions(options?: ImageGenOptions) {
+function buildImageStyleInstructions(options?: InternalImageGenOptions) {
   if (!options) {
     return "";
   }
@@ -464,11 +694,12 @@ function buildImageStyleInstructions(options?: ImageGenOptions) {
 
   if (options.style === "studio") {
     instructions +=
-      "- Setting: Professional studio lighting, polished seamless backdrop, premium surfaces or editorial props allowed when they support the product story.\n";
+      "- Setting: Professional studio lighting, seamless paper or premium studio set, controlled backdrop, and no lived-in domestic context unless explicitly required.\n";
     instructions +=
       "- Composition: Avoid a default chest-up portrait. Prefer a mix of product-centric wide frames, half-body frames, seated or standing full-figure compositions, tabletop layouts, hand interactions, and close detail inserts depending on the section goal.\n";
     instructions +=
       "- Art Direction: Crisp controlled light, subtle shadows, refined color balance, and a clearly designed studio set that feels intentional rather than empty.\n";
+    instructions += "- Scene Guardrail: If any lifestyle or outdoor guidance conflicts, keep the result unmistakably studio-led.\n";
   } else if (options.style === "lifestyle") {
     instructions +=
       "- Setting: Authentic, aspirational lifestyle environment with natural lighting, lived-in textures, and everyday context that feels believable.\n";
@@ -476,6 +707,7 @@ function buildImageStyleInstructions(options?: ImageGenOptions) {
       "- Composition: Use candid moments, on-location interaction, room context, hands using the product, and gentle movement. Vary distance between environmental wide shots, medium shots, and close usage details.\n";
     instructions +=
       "- Art Direction: Warm, human, relatable, and editorial, with enough context to explain why the product fits into daily life.\n";
+    instructions += "- Scene Guardrail: Do not collapse the result into a blank studio set unless guide priority explicitly demands it.\n";
   } else if (options.style === "outdoor") {
     instructions +=
       "- Setting: Beautiful outdoor environment with cinematic natural lighting, location depth, airiness, and scene-based storytelling.\n";
@@ -483,12 +715,18 @@ function buildImageStyleInstructions(options?: ImageGenOptions) {
       "- Composition: Use wide scenic frames, dynamic movement, environmental close-ups, and product-in-use storytelling that feels active and open.\n";
     instructions +=
       "- Art Direction: Fresh, expansive, airy, and energetic, with the location helping explain the product mood or usage context.\n";
+    instructions += "- Scene Guardrail: Keep the result clearly outdoors, not a studio imitation or an indoor lifestyle room.\n";
   }
 
   if (options.withModel) {
     if (options.referenceModelImageBase64) {
       instructions += "- Subject: MUST feature the exact same person shown in the attached reference model image.\n";
-      instructions += "- Identity Lock: Preserve the face, hairstyle, skin tone, and overall appearance of that same person while adapting pose, styling, and composition to the scene.\n";
+      instructions += "- Identity Lock: Preserve the face, hairstyle, skin tone, gender presentation, and overall appearance of that same person while adapting pose, styling, and composition to the scene.\n";
+      instructions += "- Casting Rule: Never swap to another person. Never reinterpret the reference as a different male or female model.\n";
+      if (options.referenceModelProfile) {
+        instructions += `- Stable Traits: ${options.referenceModelProfile.keepTraits.join(", ")}.\n`;
+        instructions += `- Flexible Traits: ${options.referenceModelProfile.flexibleTraits.join(", ")}.\n`;
+      }
     } else {
       const modelDescriptor = buildModelDescriptor(options);
       instructions += `- Subject: MUST feature an attractive, professional model (${modelDescriptor}) posing with and interacting naturally with the product.\n`;
@@ -500,7 +738,7 @@ function buildImageStyleInstructions(options?: ImageGenOptions) {
   return instructions;
 }
 
-function buildImagePreferenceInstructions(options?: ImageGenOptions) {
+function buildImagePreferenceInstructions(section: SectionBlueprint, options?: InternalImageGenOptions) {
   if (!options) {
     return "";
   }
@@ -516,13 +754,14 @@ function buildImagePreferenceInstructions(options?: ImageGenOptions) {
   }
 
   if (options.withModel && options.referenceModelImageBase64) {
-    parts.push("Use the attached reference model as the same person for this scene.");
+    parts.push("Use the attached reference model as the same person for this scene, with identity locked and no model swap.");
   } else if (options.withModel) {
     const modelDescriptor = buildModelDescriptor(options);
     parts.push(`If appropriate for the scene, feature a model (${modelDescriptor}).`);
   }
 
   parts.push("Keep the product central to the story and avoid collapsing the scene into a generic portrait.");
+  parts.push(`Preserve the product using this guidance: ${section.reference_usage || "keep shape, material, color, and branding accurate."}`);
 
   return parts.length ? `Style Preferences: ${parts.join(" ")}` : "";
 }
@@ -573,26 +812,8 @@ function getModelAgeDescriptor(ageRange?: ImageGenOptions["modelAgeRange"]) {
 }
 
 function parseBlueprintResponse(response: { text?: string }) {
-  if (!response.text) {
-    throw new PdpServiceError(
-      "GEMINI_RESPONSE_INVALID",
-      "AI 응답이 비어 있습니다.",
-      "Gemini did not return response.text."
-    );
-  }
-
-  let text = response.text.trim();
-  if (text.startsWith("```json")) {
-    text = text.slice(7);
-  } else if (text.startsWith("```")) {
-    text = text.slice(3);
-  }
-  if (text.endsWith("```")) {
-    text = text.slice(0, -3);
-  }
-
   try {
-    const parsed = JSON.parse(text.trim()) as Partial<LandingPageBlueprint>;
+    const parsed = JSON.parse(extractResponseText(response)) as Partial<LandingPageBlueprint>;
     return sanitizeBlueprint(parsed);
   } catch (error) {
     throw new PdpServiceError(
@@ -650,12 +871,233 @@ function normalizeSection(section: Partial<SectionBlueprint>, index: number): Se
     purpose: asString(section.purpose),
     prompt_ko: asString(section.prompt_ko),
     prompt_en: asString(section.prompt_en),
-    on_image_text: asString(section.on_image_text),
     negative_prompt: asString(section.negative_prompt),
     style_guide: asString(section.style_guide),
     reference_usage: asString(section.reference_usage),
     generatedImage: section.generatedImage
   };
+}
+
+function normalizeImageOptions(options?: InternalImageGenOptions): InternalImageGenOptions {
+  return {
+    style: options?.style ?? "studio",
+    withModel: options?.withModel ?? false,
+    modelGender: options?.modelGender ?? "female",
+    modelAgeRange: options?.modelAgeRange ?? "20s",
+    modelCountry: options?.modelCountry ?? "korea",
+    guidePriorityMode: options?.guidePriorityMode ?? "guide-first",
+    headline: options?.headline,
+    subheadline: options?.subheadline,
+    isRegeneration: options?.isRegeneration,
+    referenceModelImageBase64: options?.referenceModelImageBase64,
+    referenceModelImageMimeType: options?.referenceModelImageMimeType,
+    referenceModelImageFileName: options?.referenceModelImageFileName,
+    referenceModelProfile: options?.referenceModelProfile ?? null,
+    retryDirective: options?.retryDirective
+  };
+}
+
+function buildReferenceModelProfilePrompt(profile: ReferenceModelProfile) {
+  const stableTraits = uniqueStrings(profile.keepTraits).join(", ");
+  const flexibleTraits = uniqueStrings(profile.flexibleTraits).join(", ");
+  const distinctiveFeatures = uniqueStrings(profile.distinctiveFeatures).join(", ");
+
+  return [
+    "Reference identity profile:",
+    `gender presentation ${profile.genderPresentation};`,
+    `age impression ${profile.ageImpression};`,
+    `face shape ${profile.faceShape};`,
+    `hairstyle ${profile.hairstyle};`,
+    `skin tone ${profile.skinTone};`,
+    `eye details ${profile.eyeDetails};`,
+    `brow details ${profile.browDetails};`,
+    `lip details ${profile.lipDetails};`,
+    `overall vibe ${profile.overallVibe}.`,
+    stableTraits ? `Keep fixed: ${stableTraits}.` : "",
+    distinctiveFeatures ? `Identifying markers: ${distinctiveFeatures}.` : "",
+    flexibleTraits ? `May vary: ${flexibleTraits}.` : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function buildGuidePriorityInstructions(section: SectionBlueprint, options?: InternalImageGenOptions) {
+  const mode = options?.guidePriorityMode ?? "guide-first";
+
+  if (mode === "guide-first") {
+    return [
+      "Design Guide Priority: ON.",
+      `Image Purpose: ${section.purpose}.`,
+      section.layout_notes ? `Layout Notes: ${section.layout_notes}.` : "",
+      section.style_guide ? `Style Guide: ${section.style_guide}.` : "",
+      "If the selected shot type and guide conflict, respect the guide first and use the shot type as a supporting constraint."
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  return [
+    "Design Guide Priority: OFF.",
+    `Image Purpose: ${section.purpose}.`,
+    "Ignore Layout Notes and Style Guide whenever they conflict with the selected shot type.",
+    "Use the selected shot type as the main scene-defining instruction."
+  ].join(" ");
+}
+
+function getBaseSceneDirection(section: SectionBlueprint, mode: PdpGuidePriorityMode) {
+  if (mode === "guide-first") {
+    return [section.prompt_en, section.layout_notes, section.style_guide, section.reference_usage]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  return [
+    `Communicate this purpose clearly: ${section.purpose}.`,
+    "Build a fresh scene from the selected shot type.",
+    "Do not inherit conflicting layout or style-guide assumptions from the section metadata."
+  ].join(" ");
+}
+
+function buildValidationPrompt(profile: ReferenceModelProfile, expectedStyle: NonNullable<ImageGenOptions["style"]>) {
+  return `
+You will compare two images.
+- image 1: the uploaded reference person image
+- image 2: the newly generated candidate image
+
+Judge whether image 2 preserves the same identifiable person from image 1 while allowing new pose, styling, framing, and environment.
+
+Reference person profile:
+- gender presentation: ${profile.genderPresentation}
+- age impression: ${profile.ageImpression}
+- face shape: ${profile.faceShape}
+- hairstyle: ${profile.hairstyle}
+- skin tone: ${profile.skinTone}
+- eye details: ${profile.eyeDetails}
+- brow details: ${profile.browDetails}
+- lip details: ${profile.lipDetails}
+- overall vibe: ${profile.overallVibe}
+- keep traits: ${profile.keepTraits.join(", ")}
+- distinctive features: ${profile.distinctiveFeatures.join(", ")}
+
+Expected shot type: ${getStyleLabel(expectedStyle)}.
+
+Return JSON only with:
+- isSamePerson: boolean
+- genderPresentationPreserved: boolean
+- styleMatch: boolean
+- confidence: high | medium | low
+- reason: short explanation
+- correctionFocus: array of short phrases explaining what must be corrected
+`.trim();
+}
+
+function buildRetryDirective(
+  validation: GeneratedImageValidation,
+  profile: ReferenceModelProfile,
+  expectedStyle: NonNullable<ImageGenOptions["style"]>
+) {
+  return [
+    `The previous attempt did not pass identity/style validation: ${validation.reason}.`,
+    `Keep the same person using these fixed traits: ${uniqueStrings(profile.keepTraits).join(", ")}.`,
+    `Preserve these identifying markers: ${uniqueStrings(profile.distinctiveFeatures).join(", ")}.`,
+    validation.correctionFocus.length ? `Correct these issues: ${validation.correctionFocus.join(", ")}.` : "",
+    `The retried image must clearly read as a ${getStyleLabel(expectedStyle)} scene.`
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function parseReferenceModelProfileResponse(response: { text?: string }) {
+  try {
+    const parsed = JSON.parse(extractResponseText(response)) as Partial<ReferenceModelProfile>;
+
+    return {
+      genderPresentation: asString(parsed.genderPresentation) || "same as reference image",
+      ageImpression: asString(parsed.ageImpression) || "same age impression as reference image",
+      faceShape: asString(parsed.faceShape) || "same face shape as reference image",
+      hairstyle: asString(parsed.hairstyle) || "same hairstyle impression as reference image",
+      skinTone: asString(parsed.skinTone) || "same skin tone as reference image",
+      eyeDetails: asString(parsed.eyeDetails) || "same eye shape and gaze impression",
+      browDetails: asString(parsed.browDetails) || "same brow shape and thickness",
+      lipDetails: asString(parsed.lipDetails) || "same lip shape and expression impression",
+      overallVibe: asString(parsed.overallVibe) || "same overall vibe as the reference person",
+      distinctiveFeatures: asStringArray(parsed.distinctiveFeatures),
+      keepTraits: asStringArray(parsed.keepTraits),
+      flexibleTraits: asStringArray(parsed.flexibleTraits)
+    } satisfies ReferenceModelProfile;
+  } catch (error) {
+    throw new PdpServiceError(
+      "GEMINI_RESPONSE_INVALID",
+      "참조 모델 이미지를 해석하지 못했습니다.",
+      stringifyError(error)
+    );
+  }
+}
+
+function parseGeneratedImageValidationResponse(response: { text?: string }) {
+  try {
+    const parsed = JSON.parse(extractResponseText(response)) as Partial<GeneratedImageValidation>;
+
+    return {
+      isSamePerson: Boolean(parsed.isSamePerson),
+      genderPresentationPreserved: Boolean(parsed.genderPresentationPreserved),
+      styleMatch: Boolean(parsed.styleMatch),
+      confidence: parsed.confidence === "high" || parsed.confidence === "medium" ? parsed.confidence : "low",
+      reason: asString(parsed.reason) || "identity validation failed",
+      correctionFocus: asStringArray(parsed.correctionFocus)
+    } satisfies GeneratedImageValidation;
+  } catch (error) {
+    throw new PdpServiceError(
+      "GEMINI_RESPONSE_INVALID",
+      "생성된 이미지 검증 응답을 해석하지 못했습니다.",
+      stringifyError(error)
+    );
+  }
+}
+
+function extractResponseText(response: { text?: string }) {
+  if (!response.text) {
+    throw new PdpServiceError(
+      "GEMINI_RESPONSE_INVALID",
+      "AI 응답이 비어 있습니다.",
+      "Gemini did not return response.text."
+    );
+  }
+
+  let text = response.text.trim();
+  if (text.startsWith("```json")) {
+    text = text.slice(7);
+  } else if (text.startsWith("```")) {
+    text = text.slice(3);
+  }
+  if (text.endsWith("```")) {
+    text = text.slice(0, -3);
+  }
+
+  return text.trim();
+}
+
+function buildHighResolutionInlinePart(mimeType: string, data: string) {
+  return {
+    inlineData: {
+      mimeType,
+      data
+    },
+    mediaResolution: {
+      level: "media_resolution_high"
+    }
+  } as any;
+}
+
+function getStyleLabel(style: NonNullable<ImageGenOptions["style"]>) {
+  if (style === "lifestyle") {
+    return "lifestyle shot";
+  }
+  if (style === "outdoor") {
+    return "outdoor shot";
+  }
+
+  return "studio shot";
 }
 
 function normalizeReferenceModelImage(base64?: string, mimeType?: string) {
@@ -761,6 +1203,14 @@ function stringifyError(error: unknown) {
 
 function asString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function asStringArray(value: unknown) {
+  return Array.isArray(value) ? value.map((item) => asString(item)).filter(Boolean) : [];
+}
+
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
 }
 
 function wait(ms: number) {
