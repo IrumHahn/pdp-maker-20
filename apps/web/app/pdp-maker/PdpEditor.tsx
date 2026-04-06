@@ -1524,7 +1524,12 @@ export function PdpEditor({
                 작업 저장하기
               </button>
             ) : null}
-            <button className={styles.secondaryButton} disabled={!generatedCount || isDownloadingAll} onClick={handleDownloadAll} type="button">
+            <button
+              className={`${styles.secondaryButton} ${styles.headerActionButton} ${styles.zipDownloadButton}`}
+              disabled={!generatedCount || isDownloadingAll}
+              onClick={handleDownloadAll}
+              type="button"
+            >
               {isDownloadingAll ? <Loader2 className={styles.spinIcon} size={16} /> : <Download size={16} />}
               전체 이미지 ZIP
             </button>
