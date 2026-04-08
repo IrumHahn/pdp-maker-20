@@ -27,11 +27,18 @@ export const TONE_OPTIONS = [
   "레트로"
 ];
 
-export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
+export async function apiJson<T>(
+  path: string,
+  init?: RequestInit,
+  options?: { geminiApiKey?: string | null }
+): Promise<T> {
   const headers = new Headers(init?.headers ?? {});
   headers.set("Content-Type", "application/json");
 
-  const customGeminiApiKey = resolveGeminiApiKeyHeaderValue();
+  const customGeminiApiKey =
+    typeof options?.geminiApiKey === "string"
+      ? resolveGeminiApiKeyHeaderValue({ customGeminiApiKey: options.geminiApiKey })
+      : resolveGeminiApiKeyHeaderValue();
   if (customGeminiApiKey) {
     headers.set("X-Gemini-Api-Key", customGeminiApiKey);
   }

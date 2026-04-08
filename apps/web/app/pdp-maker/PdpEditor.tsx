@@ -53,6 +53,7 @@ import { apiJson, toDataUrl } from "./pdp-utils";
 interface PdpEditorProps {
   initialResult: GeneratedResult;
   aspectRatio: AspectRatio;
+  geminiApiKey?: string | null;
   desiredTone: string;
   initialDraftState?: PdpEditorDraftState | null;
   lastSavedAt?: string | null;
@@ -149,6 +150,7 @@ const BASIC_SOLID_COLORS = [
 export function PdpEditor({
   initialResult,
   aspectRatio,
+  geminiApiKey,
   desiredTone,
   initialDraftState,
   lastSavedAt,
@@ -1177,7 +1179,7 @@ export function PdpEditor({
             referenceModelImageFileName: usesReferenceModel ? referenceModelImage?.fileName : undefined
           }
         })
-      });
+      }, { geminiApiKey });
 
       setIsGeneratingImage(false);
 

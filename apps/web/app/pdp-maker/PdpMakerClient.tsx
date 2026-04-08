@@ -8,7 +8,12 @@ import { deletePdpDraft, getPdpDraft, listPdpDrafts, savePdpDraft } from "./pdp-
 import { PdpEditor } from "./PdpEditor";
 import { PdpSettingsSheet } from "./PdpSettingsSheet";
 import styles from "./pdp-maker.module.css";
-import { loadPdpClientSettings, savePdpClientSettings, type PdpClientSettings } from "./pdp-settings";
+import {
+  loadPdpClientSettings,
+  resolveGeminiApiKeyHeaderValue,
+  savePdpClientSettings,
+  type PdpClientSettings
+} from "./pdp-settings";
 import { RATIO_OPTIONS, TONE_OPTIONS, apiJson, prepareImageFile } from "./pdp-utils";
 
 type PreparedImage = PreparedImageDraft;
@@ -48,9 +53,10 @@ export function PdpMakerClient() {
   const preparedImageDisplayName = preparedImage ? formatCompactFileName(preparedImage.fileName) : "";
   const modelImageDisplayName = modelImage ? formatCompactFileName(modelImage.fileName) : "";
   const hasDraftContent = Boolean(preparedImage || modelImage || result || additionalInfo.trim() || desiredTone.trim() || activeDraftId);
-  const hasAvailableGeminiKey = Boolean(clientSettings.customGeminiApiKey.trim());
+  const effectiveGeminiApiKey = resolveGeminiApiKeyHeaderValue(clientSettings);
+  const hasAvailableGeminiKey = Boolean(effectiveGeminiApiKey);
   const canAnalyze = Boolean(preparedImage && (!modelImage || modelImageUsage) && hasAvailableGeminiKey);
-  const apiConnectionLabel = clientSettings.customGeminiApiKey ? "개인 API 키" : "키 필요";
+  const apiConnectionLabel = effectiveGeminiApiKey ? "개인 API 키" : "키 필요";
 
   const refreshDrafts = useCallback(async () => {
     setIsLoadingDrafts(true);
@@ -66,6 +72,10 @@ export function PdpMakerClient() {
   useEffect(() => {
     void refreshDrafts();
   }, [refreshDrafts]);
+
+  useEffect(() => {
+    setClientSettings(loadPdpClientSettings());
+  }, []);
 
   useEffect(() => {
     if (isApplyingDraftRef.current || !hasDraftContent) {
@@ -353,7 +363,7 @@ export function PdpMakerClient() {
           desiredTone: desiredTone.trim() || undefined,
           aspectRatio
         })
-      });
+      }, { geminiApiKey: effectiveGeminiApiKey });
 
       if (!response.ok) {
         setAppState("upload");
@@ -395,7 +405,7 @@ export function PdpMakerClient() {
 
   const handleSaveSettings = (nextSettings: PdpClientSettings) => {
     savePdpClientSettings(nextSettings);
-    setClientSettings(nextSettings);
+    setClientSettings(loadPdpClientSettings());
     setNotice("개인 Gemini API 키를 저장했습니다. 이 브라우저에서는 입력한 키로 바로 작업할 수 있습니다.");
   };
 
@@ -405,6 +415,7 @@ export function PdpMakerClient() {
         <PdpEditor
           key={`${activeDraftId ?? "new"}-${editorSessionKey}`}
           aspectRatio={aspectRatio}
+          geminiApiKey={effectiveGeminiApiKey}
           desiredTone={desiredTone}
           initialDraftState={editorDraftState}
           initialResult={result}
